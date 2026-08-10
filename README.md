@@ -56,6 +56,30 @@ luminus update
 
 Copy `.env.example` to `.env` if needed and configure the proxy API key, provider credentials, ports, and encryption key. Never commit secrets or production credentials.
 
+## Rust development
+
+Requirements:
+
+- Rust stable
+- Bun 1.x
+
+The Rust backend is an incremental migration foundation and does not replace the existing TypeScript/Bun functionality yet.
+
+```bash
+cargo check --workspace
+cargo test --workspace
+cargo run -p luminus-server
+```
+
+The Rust server defaults to `127.0.0.1:1931`. If that port is occupied by the existing Bun backend, override it in PowerShell:
+
+```powershell
+$env:LUMINUS_PORT="1932"
+cargo run -p luminus-server
+```
+
+Supported Rust configuration variables are `LUMINUS_HOST`, `LUMINUS_PORT`, `LUMINUS_ENV`, and `LUMINUS_LOG`.
+
 ## License
 
 MIT
