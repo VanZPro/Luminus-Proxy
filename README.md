@@ -80,6 +80,11 @@ cargo run -p luminus-server
 
 Supported Rust configuration variables are `LUMINUS_HOST`, `LUMINUS_PORT`, `LUMINUS_ENV`, and `LUMINUS_LOG`.
 
+### R2 architecture
+
+Client protocol -> protocol adapter -> canonical request -> router -> provider adapter.
+Responses follow the reverse path through the canonical response model. R2 defines these internal contracts only; it does not replace the existing TypeScript provider routing.
+
 ## License
 
 MIT
