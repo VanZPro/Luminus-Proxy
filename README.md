@@ -70,8 +70,9 @@ Rust migration phases:
 - R1: server foundation with Axum, Tokio, configuration, tracing, graceful shutdown, and `GET /health`.
 - R2: protocol-neutral canonical AI domain model and provider abstraction.
 - R3: translation-only adapters for OpenAI Chat Completions and Anthropic Messages.
+- R4: an isolated Blackbox bearer-token transport proof of concept using reqwest.
 
-R3 does not activate real Rust providers, production `/v1` protocol routes, HTTP clients, SSE, account routing, or database access. The existing TypeScript/Bun backend remains the production implementation.
+R4 is not connected to public `/v1` routes and does not include routing, retries, or streaming transport. The existing TypeScript/Bun backend remains the production implementation.
 
 ```bash
 cargo check --workspace
