@@ -1,0 +1,109 @@
+# dependencies (bun install)
+node_modules/
+
+# python venv
+.venv/
+__pycache__/
+*.pyc
+
+# sensitive data
+scripts/cookies/
+
+# local probe / intercept scripts (reverse-engineering helpers, not part of the proxy)
+scripts/probe-*.ts
+scripts/dump-*.ts
+scripts/qoder-intercept.mjs
+scripts/test-kiro-pro-inference.ts
+test/codex_direct.ts
+
+# output
+out
+dist/
+target/
+*.tgz
+
+# code coverage
+coverage/
+*.lcov
+
+# logs & pid files
+logs
+_.log
+*.log
+.poolprox.log
+.poolprox.pid
+.etteum.log
+.etteum.pid
+.aiproxy.log
+.aiproxy.pid
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# Claude Code local project overrides
+.claude/
+
+# Codebase indexing artifacts
+.codebase-memory/
+
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+# Database
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Drizzle migrations
+drizzle/
+
+# Bun lockfile (optional - some prefer to commit this)
+# bun.lock
+
+# Debug artifacts
+*.png
+
+# Claude plans (local only)
+.claude/plans/
+
+
+# Playwright MCP runtime
+.playwright-mcp/
+
+# Nested git repos (external services)
+services/windsurf-api/
+
+# Local artifacts
+poolprox.db
+poolprox3.db
+etteum-pool.db
+luminus.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/backups/
+admin-key-recovery.txt
+test-compat.out
+
+# Local test/debug scripts at project root (not part of the proxy)
+/test-*.ts
+/test-*.sh
+/test-*.mjs
+/test-*.js
