@@ -1,16 +1,13 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
-use luminus_core::{
-    protocol::CanonicalRequest,
-    provider::{ProviderAdapter, ProviderContext},
-};
+use luminus_core::{protocol::CanonicalRequest, provider::ProviderContext};
 use luminus_protocols::openai::{ChatRequest, ChatResponse};
-use luminus_providers::BlackboxProvider;
+use luminus_router::{Router as LuminusRouter, RouterError, RouterErrorCategory};
 use serde_json::json;
 
 pub async fn chat_completions(
-    State(provider): State<Option<Arc<BlackboxProvider>>>,
+    State(router): State<Arc<LuminusRouter>>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, Json<serde_json::Value>)> {
     let canonical = CanonicalRequest::try_from(request).map_err(|error| {
@@ -22,29 +19,21 @@ pub async fn chat_completions(
     if canonical.stream {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
-            Json(json!({
-                "error": {"type": "unsupported_capability", "message": "Experimental Rust execution does not support stream=true"}
-            })),
+            Json(
+                json!({"error": {"type": "unsupported_capability", "message": "Experimental Rust execution does not support stream=true"}}),
+            ),
         ));
     }
-    let provider = provider.ok_or_else(|| (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": {"type": "configuration_error", "message": "Blackbox provider is not configured"}})),
-    ))?;
+    let target = router.resolve(&canonical).map_err(router_error)?;
     let context = ProviderContext::new(
         "experimental-rust",
-        provider.provider_id().clone(),
+        target.provider.clone(),
         canonical.model.clone(),
     );
-    let response = provider
+    let response = router
         .execute(&canonical, &context)
         .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"type": "provider_error", "message": error.message}})),
-            )
-        })?;
+        .map_err(router_error)?;
     ChatResponse::try_from(response).map(Json).map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,
@@ -53,17 +42,38 @@ pub async fn chat_completions(
     })
 }
 
+fn router_error(error: RouterError) -> (StatusCode, Json<serde_json::Value>) {
+    let status = match error.category() {
+        RouterErrorCategory::ProviderNotFound
+        | RouterErrorCategory::ModelNotFound
+        | RouterErrorCategory::NoEligibleProvider => StatusCode::SERVICE_UNAVAILABLE,
+        RouterErrorCategory::UnsupportedCapability => StatusCode::NOT_IMPLEMENTED,
+        RouterErrorCategory::ProviderExecution => StatusCode::BAD_GATEWAY,
+    };
+    (
+        status,
+        Json(json!({"error": {"type": "routing_error", "message": error.to_string()}})),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{Router, body::Body, http::Request, routing::post};
     use tower::ServiceExt;
 
+    fn empty_router() -> Arc<LuminusRouter> {
+        Arc::new(LuminusRouter::new(
+            Arc::new(luminus_router::ProviderRegistry::new()),
+            None,
+        ))
+    }
+
     #[tokio::test]
-    async fn stream_requests_are_rejected_before_provider_configuration() {
+    async fn stream_requests_are_rejected_before_routing() {
         let app = Router::new()
             .route("/experimental/v1/chat/completions", post(chat_completions))
-            .with_state(None::<Arc<BlackboxProvider>>);
+            .with_state(empty_router());
         let response = app
             .oneshot(
                 Request::post("/experimental/v1/chat/completions")
@@ -82,7 +92,7 @@ mod tests {
     async fn missing_provider_is_explicit_for_non_streaming_requests() {
         let app = Router::new()
             .route("/experimental/v1/chat/completions", post(chat_completions))
-            .with_state(None::<Arc<BlackboxProvider>>);
+            .with_state(empty_router());
         let response = app
             .oneshot(
                 Request::post("/experimental/v1/chat/completions")

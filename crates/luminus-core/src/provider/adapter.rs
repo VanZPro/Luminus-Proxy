@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{future::Future, pin::Pin};
 
 use super::{ProviderContext, ProviderError};
 use crate::{
@@ -13,5 +13,5 @@ pub trait ProviderAdapter: Send + Sync {
         &'a self,
         request: &'a CanonicalRequest,
         context: &'a ProviderContext,
-    ) -> impl Future<Output = Result<CanonicalResponse, ProviderError>> + Send + 'a;
+    ) -> Pin<Box<dyn Future<Output = Result<CanonicalResponse, ProviderError>> + Send + 'a>>;
 }

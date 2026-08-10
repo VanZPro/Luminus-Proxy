@@ -123,79 +123,83 @@ impl ProviderAdapter for BlackboxProvider {
             capabilities: vec![Capability::Chat, Capability::Tools],
         }]
     }
-    async fn execute(
-        &self,
-        request: &CanonicalRequest,
-        _context: &ProviderContext,
-    ) -> Result<CanonicalResponse, ProviderError> {
-        let payload = self.request(request)?;
-        let response = self
-            .transport
-            .send(
-                self.transport
-                    .post(format!(
-                        "{}/chat/completions",
-                        self.config.base_url.trim_end_matches('/')
-                    ))
-                    .header(AUTHORIZATION, format!("Bearer {}", self.config.api_key))
-                    .header(CONTENT_TYPE, "application/json")
-                    .json(&payload)
-                    .send()
-                    .await,
-            )
-            .await?;
-        let status = response.status();
-        let cooldown = parse_retry_after(
-            response
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|v| v.to_str().ok()),
-        );
-        let raw_body = bounded_body(response).await?;
-        if !status.is_success() {
-            let detail = bounded_error_text(&raw_body);
-            let mut error = HttpTransport::status_error(status, cooldown);
-            if !detail.is_empty() {
-                error.message = format!("{}: {}", error.message, detail);
+    fn execute<'a>(
+        &'a self,
+        request: &'a CanonicalRequest,
+        _context: &'a ProviderContext,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CanonicalResponse, ProviderError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let payload = self.request(request)?;
+            let response = self
+                .transport
+                .send(
+                    self.transport
+                        .post(format!(
+                            "{}/chat/completions",
+                            self.config.base_url.trim_end_matches('/')
+                        ))
+                        .header(AUTHORIZATION, format!("Bearer {}", self.config.api_key))
+                        .header(CONTENT_TYPE, "application/json")
+                        .json(&payload)
+                        .send()
+                        .await,
+                )
+                .await?;
+            let status = response.status();
+            let cooldown = parse_retry_after(
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+            );
+            let raw_body = bounded_body(response).await?;
+            if !status.is_success() {
+                let detail = bounded_error_text(&raw_body);
+                let mut error = HttpTransport::status_error(status, cooldown);
+                if !detail.is_empty() {
+                    error.message = format!("{}: {}", error.message, detail);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-        let body: UpstreamResponse = serde_json::from_slice(&raw_body).map_err(|_| {
-            ProviderError::new(
-                ProviderErrorCategory::ProviderFailure,
-                "Invalid Blackbox response JSON",
-                false,
-            )
-        })?;
-        let choice = body.choices.into_iter().next().ok_or_else(|| {
-            ProviderError::new(
-                ProviderErrorCategory::ProviderFailure,
-                "Blackbox response contained no choices",
-                false,
-            )
-        })?;
-        Ok(CanonicalResponse {
-            id: ResponseId(body.id),
-            model: ModelId(body.model.unwrap_or_else(|| request.model.0.clone())),
-            content: vec![ContentPart::text(
-                choice.message.content.unwrap_or_default(),
-            )],
-            finish_reason: match choice.finish_reason.as_deref() {
-                Some("length") => FinishReason::Length,
-                Some("tool_calls") => FinishReason::ToolCalls,
-                Some("content_filter") => FinishReason::ContentFilter,
-                _ => FinishReason::Stop,
-            },
-            usage: body
-                .usage
-                .map(|u| Usage {
-                    input_tokens: u.prompt_tokens,
-                    output_tokens: u.completion_tokens,
-                    total_tokens: u.total_tokens,
-                    ..Usage::default()
-                })
-                .unwrap_or_default(),
-            provider_metadata: None,
+            let body: UpstreamResponse = serde_json::from_slice(&raw_body).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorCategory::ProviderFailure,
+                    "Invalid Blackbox response JSON",
+                    false,
+                )
+            })?;
+            let choice = body.choices.into_iter().next().ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorCategory::ProviderFailure,
+                    "Blackbox response contained no choices",
+                    false,
+                )
+            })?;
+            Ok(CanonicalResponse {
+                id: ResponseId(body.id),
+                model: ModelId(body.model.unwrap_or_else(|| request.model.0.clone())),
+                content: vec![ContentPart::text(
+                    choice.message.content.unwrap_or_default(),
+                )],
+                finish_reason: match choice.finish_reason.as_deref() {
+                    Some("length") => FinishReason::Length,
+                    Some("tool_calls") => FinishReason::ToolCalls,
+                    Some("content_filter") => FinishReason::ContentFilter,
+                    _ => FinishReason::Stop,
+                },
+                usage: body
+                    .usage
+                    .map(|u| Usage {
+                        input_tokens: u.prompt_tokens,
+                        output_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
+                        ..Usage::default()
+                    })
+                    .unwrap_or_default(),
+                provider_metadata: None,
+            })
         })
     }
 }

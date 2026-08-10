@@ -524,6 +524,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-router"
+version = "0.1.0"
+dependencies = [
+ "luminus-core",
+ "luminus-protocols",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "luminus-server"
 version = "0.1.0"
 dependencies = [
@@ -531,6 +542,7 @@ dependencies = [
  "luminus-core",
  "luminus-protocols",
  "luminus-providers",
+ "luminus-router",
  "serde",
  "serde_json",
  "tokio",

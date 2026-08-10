@@ -72,8 +72,10 @@ Rust migration phases:
 - R3: translation-only adapters for OpenAI Chat Completions and Anthropic Messages.
 - R4: an isolated Blackbox bearer-token transport proof of concept using reqwest.
 - R5: Blackbox execution hardening with bounded response handling and safe error parsing.
+- R6: experimental non-streaming OpenAI execution endpoint wired to the Blackbox adapter.
+- R7: provider-neutral router and registry foundation for the experimental endpoint.
 
-Blackbox streaming remains disabled in R5 because the existing TypeScript implementation passes the raw body through without verifying the upstream wire format. R4/R5 are not connected to public `/v1` routes; the existing TypeScript/Bun backend remains the production implementation.
+Blackbox is still the only real Rust provider. There is no fallback, retry loop, account pool, database, or streaming support yet. The experimental endpoint remains non-streaming and does not add production `/v1` routes; the existing TypeScript/Bun backend remains the production implementation.
 
 ```bash
 cargo check --workspace

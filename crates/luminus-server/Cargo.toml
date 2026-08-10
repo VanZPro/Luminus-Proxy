@@ -9,6 +9,7 @@ axum.workspace = true
 luminus-core = { path = "../luminus-core" }
 luminus-protocols = { path = "../luminus-protocols" }
 luminus-providers = { path = "../luminus-providers" }
+luminus-router = { path = "../luminus-router" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

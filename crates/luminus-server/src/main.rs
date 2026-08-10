@@ -1,8 +1,9 @@
 mod app;
 mod routes;
 
-use luminus_core::AppConfig;
+use luminus_core::{AppConfig, model::ProviderId};
 use luminus_providers::{BlackboxConfig, BlackboxProvider};
+use luminus_router::{ProviderRegistry, Router as LuminusRouter};
 use std::sync::Arc;
 use tracing::info;
 
@@ -27,7 +28,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))?)),
         _ => None,
     };
-    axum::serve(listener, app::experimental_app(provider))
+    let mut registry = ProviderRegistry::new();
+    if let Some(provider) = provider {
+        registry.register(provider);
+    }
+    let router = Arc::new(LuminusRouter::new(
+        Arc::new(registry),
+        Some(ProviderId("blackbox".into())),
+    ));
+    axum::serve(listener, app::experimental_app(router))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
