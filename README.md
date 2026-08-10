@@ -65,6 +65,14 @@ Requirements:
 
 The Rust backend is an incremental migration foundation and does not replace the existing TypeScript/Bun functionality yet.
 
+Rust migration phases:
+
+- R1: server foundation with Axum, Tokio, configuration, tracing, graceful shutdown, and `GET /health`.
+- R2: protocol-neutral canonical AI domain model and provider abstraction.
+- R3: translation-only adapters for OpenAI Chat Completions and Anthropic Messages.
+
+R3 does not activate real Rust providers, production `/v1` protocol routes, HTTP clients, SSE, account routing, or database access. The existing TypeScript/Bun backend remains the production implementation.
+
 ```bash
 cargo check --workspace
 cargo test --workspace

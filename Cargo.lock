@@ -247,6 +247,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-protocols"
+version = "0.1.0"
+dependencies = [
+ "luminus-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "luminus-server"
 version = "0.1.0"
 dependencies = [
