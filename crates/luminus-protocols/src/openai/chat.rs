@@ -13,6 +13,7 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub max_completion_tokens: Option<u32>,
     pub stop: Option<Stop>,
+    #[serde(default)]
     pub stream: bool,
     pub tools: Option<Vec<ChatTool>>,
     pub tool_choice: Option<Value>,

@@ -2,6 +2,8 @@ mod app;
 mod routes;
 
 use luminus_core::AppConfig;
+use luminus_providers::{BlackboxConfig, BlackboxProvider};
+use std::sync::Arc;
 use tracing::info;
 
 #[tokio::main]
@@ -16,7 +18,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&address).await?;
     info!(service = "luminus", version = env!("CARGO_PKG_VERSION"), %address, environment = %config.environment, "server started");
 
-    axum::serve(listener, app::app())
+    let provider = match (
+        std::env::var("BLACKBOX_BASE_URL"),
+        std::env::var("BLACKBOX_API_KEY"),
+    ) {
+        (Ok(base_url), Ok(api_key)) => Some(Arc::new(BlackboxProvider::new(BlackboxConfig::new(
+            base_url, api_key,
+        ))?)),
+        _ => None,
+    };
+    axum::serve(listener, app::experimental_app(provider))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
