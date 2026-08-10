@@ -1,4 +1,4 @@
-use crate::http::{HttpTransport, parse_retry_after};
+use crate::http::{HttpTransport, bounded_body, bounded_error_text, parse_retry_after};
 use luminus_core::{
     model::{Capability, ModelId, ModelInfo, ProviderId},
     protocol::{CanonicalRequest, CanonicalResponse, ContentPart, FinishReason, ResponseId, Usage},
@@ -144,16 +144,23 @@ impl ProviderAdapter for BlackboxProvider {
                     .await,
             )
             .await?;
-        if !response.status().is_success() {
-            let cooldown = parse_retry_after(
-                response
-                    .headers()
-                    .get(RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok()),
-            );
-            return Err(HttpTransport::status_error(response.status(), cooldown));
+        let status = response.status();
+        let cooldown = parse_retry_after(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
+        let raw_body = bounded_body(response).await?;
+        if !status.is_success() {
+            let detail = bounded_error_text(&raw_body);
+            let mut error = HttpTransport::status_error(status, cooldown);
+            if !detail.is_empty() {
+                error.message = format!("{}: {}", error.message, detail);
+            }
+            return Err(error);
         }
-        let body: UpstreamResponse = response.json().await.map_err(|_| {
+        let body: UpstreamResponse = serde_json::from_slice(&raw_body).map_err(|_| {
             ProviderError::new(
                 ProviderErrorCategory::ProviderFailure,
                 "Invalid Blackbox response JSON",

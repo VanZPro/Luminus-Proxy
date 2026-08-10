@@ -2,6 +2,33 @@ use luminus_core::provider::{ProviderError, ProviderErrorCategory};
 use reqwest::{Client, Response, StatusCode};
 use std::time::Duration;
 
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+pub async fn bounded_body(response: Response) -> Result<Vec<u8>, ProviderError> {
+    let bytes = response.bytes().await.map_err(|_| {
+        ProviderError::new(
+            ProviderErrorCategory::UpstreamUnavailable,
+            "Failed to read Blackbox response body",
+            true,
+        )
+    })?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(ProviderError::new(
+            ProviderErrorCategory::ProviderFailure,
+            "Blackbox response body exceeded the 8 MiB limit",
+            false,
+        ));
+    }
+    Ok(bytes.to_vec())
+}
+
+pub fn bounded_error_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[..bytes.len().min(4096)])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub struct HttpTransport {
     client: Client,
 }
@@ -70,6 +97,18 @@ impl std::fmt::Debug for HttpTransport {
 
 pub fn parse_retry_after(value: Option<&str>) -> Option<u64> {
     value.and_then(|value| value.trim().parse().ok())
+}
+
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+
+    #[test]
+    fn error_text_is_bounded_and_single_line() {
+        let text = bounded_error_text(b"a\nb\r\nc");
+        assert_eq!(text, "a b c");
+        assert!(bounded_error_text(&vec![b'x'; 5000]).len() <= 4096);
+    }
 }
 
 #[cfg(test)]

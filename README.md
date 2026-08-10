@@ -71,8 +71,9 @@ Rust migration phases:
 - R2: protocol-neutral canonical AI domain model and provider abstraction.
 - R3: translation-only adapters for OpenAI Chat Completions and Anthropic Messages.
 - R4: an isolated Blackbox bearer-token transport proof of concept using reqwest.
+- R5: Blackbox execution hardening with bounded response handling and safe error parsing.
 
-R4 is not connected to public `/v1` routes and does not include routing, retries, or streaming transport. The existing TypeScript/Bun backend remains the production implementation.
+Blackbox streaming remains disabled in R5 because the existing TypeScript implementation passes the raw body through without verifying the upstream wire format. R4/R5 are not connected to public `/v1` routes; the existing TypeScript/Bun backend remains the production implementation.
 
 ```bash
 cargo check --workspace
