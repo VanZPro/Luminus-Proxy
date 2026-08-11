@@ -169,7 +169,10 @@ impl Router {
             }
         }
         let mut visited: HashSet<(String, String, Option<AccountId>)> = HashSet::new();
-        for candidate in expanded.iter().take(plan.policy.max_attempts) {
+        for candidate in &expanded {
+            if attempts.len() >= plan.policy.max_attempts {
+                break;
+            }
             if !visited.insert((
                 candidate.provider.0.clone(),
                 candidate.model.0.clone(),
