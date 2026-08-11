@@ -6,6 +6,7 @@ members = [
     "crates/luminus-protocols",
     "crates/luminus-providers",
     "crates/luminus-router",
+    "crates/luminus-storage",
 ]
 
 [workspace.package]

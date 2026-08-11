@@ -556,6 +556,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-storage"
+version = "0.1.0"
+dependencies = [
+ "luminus-core",
+ "thiserror",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

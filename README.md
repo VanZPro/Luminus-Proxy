@@ -80,8 +80,9 @@ Rust migration phases:
 - R11: in-memory account health and cooldown eligibility.
 - R12: deterministic account selection with FirstEligible and RoundRobin policies.
 - R13: separate same-target retryability from cross-target fallbackability.
+- R14: storage/persistence boundary and TypeScript database architecture audit.
 
-Blackbox is still the only real Rust provider. R9-R13 account state is process-local: restart clears cooldowns and selection cursors; health filtering occurs before selection; there is no database persistence, background timer, quota-aware, weighted, or random routing, timed retry, or streaming support. FirstEligible remains the server default; RoundRobin is selectable in Router construction. Provider errors now expose fallbackability independently from same-target retryability.
+R14 adds no database driver, does not read or write the production database, and performs no schema migration. The runtime `AccountPool` remains in-memory, secret persistence is deferred, and the TypeScript/Bun backend remains production. Blackbox is still the only real Rust provider.
 
 ```bash
 cargo check --workspace
