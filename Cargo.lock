@@ -572,6 +572,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-legacy-composition"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "luminus-composition",
+ "luminus-core",
+ "luminus-legacy-credentials",
+ "luminus-legacy-provider-config",
+ "luminus-provider-config",
+ "luminus-router",
+ "luminus-secrets",
+ "luminus-storage",
+ "luminus-storage-sqlite",
+ "rusqlite",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "luminus-legacy-credentials"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,35 @@
+[package]
+name = "luminus-legacy-composition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+luminus-core = { path = "../luminus-core" }
+luminus-storage = { path = "../luminus-storage" }
+luminus-storage-sqlite = { path = "../luminus-storage-sqlite" }
+luminus-secrets = { path = "../luminus-secrets" }
+luminus-legacy-credentials = { path = "../luminus-legacy-credentials" }
+luminus-legacy-provider-config = { path = "../luminus-legacy-provider-config" }
+luminus-composition = { path = "../luminus-composition" }
+luminus-provider-config = { path = "../luminus-provider-config" }
+luminus-router = { path = "../luminus-router" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+rusqlite.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata]
+description = "Synthetic/read-only legacy BYOK Blackbox runtime composition"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+

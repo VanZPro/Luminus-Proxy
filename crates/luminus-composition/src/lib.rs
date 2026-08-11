@@ -124,6 +124,31 @@ pub struct HydrationOutcome {
     pub report: HydrationReport,
 }
 
+/// Builds a concrete runtime Blackbox account from already-resolved typed values.
+/// This boundary deliberately knows nothing about persistence, legacy providers, or resolvers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlackboxConstructionError;
+
+pub fn build_blackbox_provider_account(
+    account_id: AccountId,
+    config: BlackboxProviderConfig,
+    credentials: BlackboxCredentials,
+) -> Result<ProviderAccount, BlackboxConstructionError> {
+    let provider = BlackboxProvider::new(BlackboxConfig::new(
+        config.base_url,
+        credentials.api_key.expose_secret(),
+    ))
+    .map_err(|_| BlackboxConstructionError)?;
+    Ok(ProviderAccount {
+        descriptor: luminus_core::model::AccountDescriptor {
+            id: account_id,
+            provider: ProviderId::from("blackbox"),
+            enabled: true,
+        },
+        adapter: Arc::new(provider),
+    })
+}
+
 pub struct BlackboxAccountHydrator {
     repository: Arc<dyn AccountRepository>,
     resolver: Arc<dyn CredentialResolver<BlackboxCredentials>>,
@@ -203,25 +228,21 @@ impl BlackboxAccountHydrator {
                     continue;
                 }
             };
-            let provider = match BlackboxProvider::new(BlackboxConfig::new(
-                config.base_url,
-                credentials.api_key.expose_secret(),
-            )) {
-                Ok(provider) => provider,
-                Err(_) => {
-                    report.failures.push(HydrationReportEntry {
-                        account_id: record.id,
-                        provider_id: blackbox.clone(),
-                        failure: HydrationFailure::ProviderConstruction,
-                    });
-                    continue;
-                }
-            };
-            pool.register(ProviderAccount {
-                descriptor: record.into(),
-                adapter: Arc::new(provider),
-            })
-            .map_err(|_| StorageError::InvalidRecord)?;
+            let account_id = record.id.clone();
+            let provider =
+                match build_blackbox_provider_account(account_id.clone(), config, credentials) {
+                    Ok(provider) => provider,
+                    Err(_) => {
+                        report.failures.push(HydrationReportEntry {
+                            account_id: record.id,
+                            provider_id: blackbox.clone(),
+                            failure: HydrationFailure::ProviderConstruction,
+                        });
+                        continue;
+                    }
+                };
+            pool.register(provider)
+                .map_err(|_| StorageError::InvalidRecord)?;
         }
         Ok(HydrationOutcome {
             account_pool: pool,
