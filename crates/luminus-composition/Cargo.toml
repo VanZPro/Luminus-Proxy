@@ -8,6 +8,9 @@ license.workspace = true
 luminus-core = { path = "../luminus-core" }
 luminus-secrets = { path = "../luminus-secrets" }
 luminus-legacy-credentials = { path = "../luminus-legacy-credentials" }
+luminus-providers = { path = "../luminus-providers" }
+luminus-router = { path = "../luminus-router" }
+luminus-storage = { path = "../luminus-storage" }
 thiserror.workspace = true
 
 [dev-dependencies]

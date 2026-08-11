@@ -91,6 +91,8 @@ R18 supports read-only compatibility with the verified TypeScript XOR/Base64 `ac
 
 R19 adds an offline typed legacy BYOK credential resolver. It reads only synthetic encrypted password rows, requires an explicit key, does not read tokens or metadata, does not hydrate AccountPool, does not add provider transport, and does not wire the server. The TypeScript backend remains production.
 
+R20 adds isolated startup hydration from `AccountRepository` plus a typed `CredentialResolver<BlackboxCredentials>` into real `BlackboxProvider` instances and `AccountPool`, using explicit synthetic configuration and credentials. Disabled and unrelated-provider records are skipped, per-account credential failures are reported safely, repository order is preserved, and no production database, environment key, server wiring, or legacy BYOK-to-Blackbox assumption is introduced.
+
 R15 uses an explicit database path and a separate SQLite adapter crate with a minimal Rust-native schema. R16 adds a separate read-only adapter for the TypeScript `accounts` metadata projection. R17 adds only architecture foundations: source-only credential/encryption audit, redacted `SecretString`, and a typed synthetic resolver contract. No production credentials were read, no production database was opened, no decryption implementation or server credential loading was added, and the existing Blackbox environment configuration remains active. The TypeScript/Bun backend remains production.
 
 R14/R15 do not migrate the production database. The runtime `AccountPool` remains in-memory, secret persistence is deferred, and Blackbox is still the only real Rust provider.
