@@ -34,6 +34,10 @@ impl ProviderError {
             cooldown_seconds: None,
         }
     }
+
+    pub fn fallback_allowed(&self) -> bool {
+        !matches!(self.category, ProviderErrorCategory::InvalidRequest)
+    }
 }
 
 #[cfg(test)]
@@ -50,5 +54,27 @@ mod tests {
         };
         assert!(error.retryable);
         assert_eq!(error.category, ProviderErrorCategory::RateLimit);
+    }
+
+    #[test]
+    fn fallbackability_is_independent_from_same_target_retryability() {
+        let categories = [
+            ProviderErrorCategory::Authentication,
+            ProviderErrorCategory::RateLimit,
+            ProviderErrorCategory::QuotaExceeded,
+            ProviderErrorCategory::Timeout,
+            ProviderErrorCategory::UpstreamUnavailable,
+            ProviderErrorCategory::ProviderFailure,
+            ProviderErrorCategory::UnsupportedCapability,
+        ];
+        for category in categories {
+            let error = ProviderError::new(category, "target failure", false);
+            assert!(error.fallback_allowed());
+            assert!(!error.retryable);
+        }
+        assert!(
+            !ProviderError::new(ProviderErrorCategory::InvalidRequest, "bad request", true,)
+                .fallback_allowed()
+        );
     }
 }

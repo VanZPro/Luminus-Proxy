@@ -21,17 +21,17 @@ pub struct RouteCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingPolicy {
     pub max_attempts: usize,
-    pub fallback_on_retryable: bool,
+    pub fallback_enabled: bool,
 }
 
 impl RoutingPolicy {
-    pub fn new(max_attempts: usize, fallback_on_retryable: bool) -> Result<Self, RouterError> {
+    pub fn new(max_attempts: usize, fallback_enabled: bool) -> Result<Self, RouterError> {
         if max_attempts == 0 {
             return Err(RouterError::InvalidPolicy);
         }
         Ok(Self {
             max_attempts,
-            fallback_on_retryable,
+            fallback_enabled,
         })
     }
 }
@@ -48,6 +48,7 @@ pub enum RouteAttemptOutcome {
     Failed {
         category: luminus_core::provider::ProviderErrorCategory,
         retryable: bool,
+        fallback_allowed: bool,
     },
 }
 
@@ -274,15 +275,17 @@ impl Router {
                         );
                     }
                     let retryable = error.retryable;
+                    let fallback_allowed = error.fallback_allowed();
                     let category = error.category;
                     attempts.push(RouteAttempt {
                         target: candidate.clone(),
                         outcome: RouteAttemptOutcome::Failed {
                             category,
                             retryable,
+                            fallback_allowed,
                         },
                     });
-                    if !retryable || !plan.policy.fallback_on_retryable {
+                    if !fallback_allowed || !plan.policy.fallback_enabled {
                         return Err(RouterError::ProviderExecution(error));
                     }
                 }

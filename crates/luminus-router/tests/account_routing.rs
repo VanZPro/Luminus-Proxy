@@ -159,24 +159,31 @@ async fn retryable_errors_fallback_and_context_is_preserved() {
 }
 
 #[tokio::test]
-async fn invalid_request_and_authentication_stop_without_fallback() {
-    for category in [
-        ProviderErrorCategory::InvalidRequest,
-        ProviderErrorCategory::Authentication,
-    ] {
-        let (router, seen, provider) = setup(&[Some(category), None]);
-        assert!(matches!(
-            router
-                .execute_plan(
-                    &request(),
-                    &plan(provider, 2),
-                    &ProviderContext::new("id", ProviderId::from("fake"), ModelId("m".into()))
-                )
-                .await,
-            Err(RouterError::ProviderExecution(_))
-        ));
-        assert_eq!(seen.lock().unwrap().len(), 1);
-    }
+async fn invalid_request_stops_but_authentication_falls_back() {
+    let (router, seen, provider) = setup(&[Some(ProviderErrorCategory::InvalidRequest), None]);
+    assert!(matches!(
+        router
+            .execute_plan(
+                &request(),
+                &plan(provider.clone(), 2),
+                &ProviderContext::new("id", ProviderId::from("fake"), ModelId("m".into()))
+            )
+            .await,
+        Err(RouterError::ProviderExecution(_))
+    ));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+
+    let (router, seen, provider) = setup(&[Some(ProviderErrorCategory::Authentication), None]);
+    let execution = router
+        .execute_plan(
+            &request(),
+            &plan(provider.clone(), 2),
+            &ProviderContext::new("id", provider, ModelId("m".into())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(execution.attempts.len(), 2);
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
