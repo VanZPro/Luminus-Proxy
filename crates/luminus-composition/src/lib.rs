@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use luminus_core::model::{AccountId, ProviderId};
 use luminus_legacy_credentials::{LegacyCredentialError, LegacyPasswordReader};
+use luminus_provider_config::{ProviderConfigError, ProviderConfigRequest, ProviderConfigResolver};
 use luminus_providers::providers::blackbox::{BlackboxConfig, BlackboxProvider};
 use luminus_router::{AccountPool, ProviderAccount};
 use luminus_secrets::{
@@ -88,12 +89,17 @@ impl fmt::Debug for BlackboxCredentials {
     }
 }
 
-pub struct BlackboxHydrationConfig {
+pub struct BlackboxProviderConfig {
     pub base_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HydrationFailure {
+    ConfigurationNotFound,
+    ConfigurationUnavailable,
+    ConfigurationInvalid,
+    ConfigurationUnsupported,
+    ConfigurationInternal,
     CredentialNotFound,
     CredentialUnavailable,
     CredentialInvalid,
@@ -121,19 +127,19 @@ pub struct HydrationOutcome {
 pub struct BlackboxAccountHydrator {
     repository: Arc<dyn AccountRepository>,
     resolver: Arc<dyn CredentialResolver<BlackboxCredentials>>,
-    config: BlackboxHydrationConfig,
+    config_resolver: Arc<dyn ProviderConfigResolver<BlackboxProviderConfig>>,
 }
 
 impl BlackboxAccountHydrator {
     pub fn new(
         repository: Arc<dyn AccountRepository>,
         resolver: Arc<dyn CredentialResolver<BlackboxCredentials>>,
-        config: BlackboxHydrationConfig,
+        config_resolver: Arc<dyn ProviderConfigResolver<BlackboxProviderConfig>>,
     ) -> Self {
         Self {
             repository,
             resolver,
-            config,
+            config_resolver,
         }
     }
 
@@ -147,6 +153,37 @@ impl BlackboxAccountHydrator {
                 continue;
             }
             let request = CredentialRequest::new(record.id.clone(), blackbox.clone());
+            let config = match self
+                .config_resolver
+                .resolve(&ProviderConfigRequest::new(
+                    record.id.clone(),
+                    blackbox.clone(),
+                ))
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    let failure = match error {
+                        ProviderConfigError::NotFound => HydrationFailure::ConfigurationNotFound,
+                        ProviderConfigError::Unavailable => {
+                            HydrationFailure::ConfigurationUnavailable
+                        }
+                        ProviderConfigError::InvalidConfiguration => {
+                            HydrationFailure::ConfigurationInvalid
+                        }
+                        ProviderConfigError::Unsupported => {
+                            HydrationFailure::ConfigurationUnsupported
+                        }
+                        ProviderConfigError::Internal => HydrationFailure::ConfigurationInternal,
+                    };
+                    report.failures.push(HydrationReportEntry {
+                        account_id: record.id,
+                        provider_id: blackbox.clone(),
+                        failure,
+                    });
+                    continue;
+                }
+            };
             let credentials = match self.resolver.resolve(&request).await {
                 Ok(value) => value,
                 Err(error) => {
@@ -167,7 +204,7 @@ impl BlackboxAccountHydrator {
                 }
             };
             let provider = match BlackboxProvider::new(BlackboxConfig::new(
-                self.config.base_url.clone(),
+                config.base_url,
                 credentials.api_key.expose_secret(),
             )) {
                 Ok(provider) => provider,
@@ -345,6 +382,28 @@ mod hydration_tests {
         }
     }
 
+    struct SyntheticConfigResolver;
+
+    impl ProviderConfigResolver<BlackboxProviderConfig> for SyntheticConfigResolver {
+        fn resolve<'a>(
+            &'a self,
+            request: &'a ProviderConfigRequest,
+        ) -> luminus_provider_config::ProviderConfigResolverFuture<'a, BlackboxProviderConfig>
+        {
+            Box::pin(async move {
+                if request.provider_id != ProviderId::from("blackbox") {
+                    return Err(ProviderConfigError::Unsupported);
+                }
+                if request.account_id == AccountId::from("bad-config") {
+                    return Err(ProviderConfigError::NotFound);
+                }
+                Ok(BlackboxProviderConfig {
+                    base_url: "http://127.0.0.1:1".into(),
+                })
+            })
+        }
+    }
+
     fn make_hydrator(
         records: Vec<StoredAccount>,
         values: &[(&str, Result<&str, SecretError>)],
@@ -370,13 +429,7 @@ mod hydration_tests {
             calls: calls.clone(),
         });
         (
-            BlackboxAccountHydrator::new(
-                repository,
-                resolver,
-                BlackboxHydrationConfig {
-                    base_url: "http://127.0.0.1:1".into(),
-                },
-            ),
+            BlackboxAccountHydrator::new(repository, resolver, Arc::new(SyntheticConfigResolver)),
             calls,
         )
     }
@@ -449,6 +502,27 @@ mod hydration_tests {
             AccountId::from("bad")
         );
         assert!(!format!("{:?}", outcome.report).contains("key-good"));
+    }
+
+    #[tokio::test]
+    async fn configuration_failure_prevents_credential_resolution() {
+        let (hydrator, calls) = make_hydrator(
+            vec![
+                StoredAccount::new("bad-config", "blackbox", true),
+                StoredAccount::new("good", "blackbox", true),
+            ],
+            &[
+                ("bad-config", Ok("must-not-be-read")),
+                ("good", Ok("key-good")),
+            ],
+        );
+        let outcome = hydrator.hydrate().await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![AccountId::from("good")]);
+        assert_eq!(
+            outcome.report.failures[0].failure,
+            HydrationFailure::ConfigurationNotFound
+        );
+        assert!(!format!("{:?}", outcome.report).contains("must-not-be-read"));
     }
 }
 

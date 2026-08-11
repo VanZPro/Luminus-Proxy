@@ -11,6 +11,7 @@ luminus-legacy-credentials = { path = "../luminus-legacy-credentials" }
 luminus-providers = { path = "../luminus-providers" }
 luminus-router = { path = "../luminus-router" }
 luminus-storage = { path = "../luminus-storage" }
+luminus-provider-config = { path = "../luminus-provider-config" }
 thiserror.workspace = true
 
 [dev-dependencies]

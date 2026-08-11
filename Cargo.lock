@@ -552,6 +552,7 @@ dependencies = [
  "base64",
  "luminus-core",
  "luminus-legacy-credentials",
+ "luminus-provider-config",
  "luminus-providers",
  "luminus-router",
  "luminus-secrets",
@@ -590,6 +591,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "luminus-provider-config"
+version = "0.1.0"
+dependencies = [
+ "luminus-core",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
