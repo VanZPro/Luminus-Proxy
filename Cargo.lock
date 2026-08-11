@@ -555,6 +555,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-legacy-credentials"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "luminus-core",
+ "luminus-secrets",
+ "rusqlite",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "luminus-protocols"
 version = "0.1.0"
 dependencies = [

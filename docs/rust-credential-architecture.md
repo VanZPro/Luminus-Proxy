@@ -42,4 +42,10 @@ The intended future startup composition is:
 
 `StoredAccount -> provider-specific resolver -> typed credentials -> provider composition -> ProviderAdapter -> ProviderAccount -> AccountPool -> Router`.
 
-R17 defines only the safe contract and synthetic proof. Compatible legacy credential-row reading and cryptographic compatibility are deferred until a later phase confirms the required format and key boundary without accessing production data.
+R17 defines only the safe contract and synthetic proof. R18 adds a separate `luminus-legacy-credentials` compatibility crate for the verified `accounts.password` format only. The TypeScript implementation uses TextEncoder UTF-8 bytes, repeating-key XOR indexed by byte position, standard Base64 encoding/decoding, and TextDecoder replacement semantics for invalid UTF-8. An empty key would make the TypeScript modulo operation invalid; Rust rejects it as `InvalidKey`. Malformed Base64 returns `InvalidCiphertext`, and invalid UTF-8 is rejected as `InvalidMaterial` because Rust cannot safely reproduce replacement semantics without silently changing credential material.
+
+The R18 decoder accepts `LegacyCiphertext` and an explicitly supplied `SecretString` key. It performs no environment lookup and does not copy the TypeScript fallback-key value. `LegacyCiphertext` is privately stored and fully redacted in Debug. There is no public legacy encoder: XOR/Base64 is read compatibility only and must not be used for new Rust-native writes.
+
+`LegacyPasswordReader` receives an explicit `PathBuf`, opens with `SQLITE_OPEN_READ_ONLY`, uses `spawn_blocking`, and selects only `id, provider, password FROM accounts ORDER BY id`. Lookups use bound parameters and reuse the R16 `legacy-ts:<numeric-id>` mapping. It does not select or parse email, tokens, metadata, quota, or other fields. Synthetic temporary fixtures cover fixed vectors, malformed Base64, empty keys, redaction, read-only SQL projection, deterministic lookup, and end-to-end decode to `SecretString`.
+
+This XOR format has no nonce, authentication tag, integrity protection, or version marker. A wrong key can produce valid UTF-8, so successful decoding does not prove key correctness. Tokens, metadata, provider interpretation, production key policy, and production database access remain deferred.
