@@ -11,6 +11,8 @@ pub enum RouterError {
     UnsupportedCapability,
     #[error("no eligible provider")]
     NoEligibleProvider,
+    #[error("invalid routing policy")]
+    InvalidPolicy,
     #[error("provider execution failed: {0}")]
     ProviderExecution(#[from] ProviderError),
 }
@@ -22,6 +24,7 @@ pub enum RouterErrorCategory {
     UnsupportedCapability,
     NoEligibleProvider,
     ProviderExecution,
+    InvalidPolicy,
 }
 impl RouterError {
     pub fn category(&self) -> RouterErrorCategory {
@@ -31,6 +34,7 @@ impl RouterError {
             Self::UnsupportedCapability => RouterErrorCategory::UnsupportedCapability,
             Self::NoEligibleProvider => RouterErrorCategory::NoEligibleProvider,
             Self::ProviderExecution(_) => RouterErrorCategory::ProviderExecution,
+            Self::InvalidPolicy => RouterErrorCategory::InvalidPolicy,
         }
     }
 }

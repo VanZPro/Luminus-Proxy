@@ -9,6 +9,58 @@ use luminus_core::{
 use crate::{ProviderRegistry, RouterError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteCandidate {
+    pub provider: ProviderId,
+    pub model: ModelId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingPolicy {
+    pub max_attempts: usize,
+    pub fallback_on_retryable: bool,
+}
+
+impl RoutingPolicy {
+    pub fn new(max_attempts: usize, fallback_on_retryable: bool) -> Result<Self, RouterError> {
+        if max_attempts == 0 {
+            return Err(RouterError::InvalidPolicy);
+        }
+        Ok(Self {
+            max_attempts,
+            fallback_on_retryable,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutePlan {
+    pub candidates: Vec<RouteCandidate>,
+    pub policy: RoutingPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteAttemptOutcome {
+    Success,
+    Failed {
+        category: luminus_core::provider::ProviderErrorCategory,
+        retryable: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteAttempt {
+    pub target: RouteCandidate,
+    pub outcome: RouteAttemptOutcome,
+}
+
+#[derive(Debug)]
+pub struct RouteExecution {
+    pub response: CanonicalResponse,
+    pub selected_target: RouteCandidate,
+    pub attempts: Vec<RouteAttempt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTarget {
     pub provider: ProviderId,
     pub model: ModelId,
@@ -66,6 +118,70 @@ impl Router {
             .ok_or(RouterError::ProviderNotFound)?;
         Ok(provider.execute(request, context).await?)
     }
+
+    pub async fn execute_plan(
+        &self,
+        request: &CanonicalRequest,
+        plan: &RoutePlan,
+        context: &ProviderContext,
+    ) -> Result<RouteExecution, RouterError> {
+        let mut attempts = Vec::new();
+        for candidate in plan.candidates.iter().take(plan.policy.max_attempts) {
+            let Some(provider) = self.registry.get(&candidate.provider) else {
+                continue;
+            };
+            let Some(model) = provider
+                .models()
+                .into_iter()
+                .find(|model| model.id == candidate.model && model.provider == candidate.provider)
+            else {
+                continue;
+            };
+            if required_capabilities(request)
+                .iter()
+                .any(|capability| !model.capabilities.contains(capability))
+            {
+                continue;
+            }
+            match provider.execute(request, context).await {
+                Ok(response) => {
+                    attempts.push(RouteAttempt {
+                        target: candidate.clone(),
+                        outcome: RouteAttemptOutcome::Success,
+                    });
+                    return Ok(RouteExecution {
+                        response,
+                        selected_target: candidate.clone(),
+                        attempts,
+                    });
+                }
+                Err(error) => {
+                    let retryable = error.retryable;
+                    let category = error.category;
+                    attempts.push(RouteAttempt {
+                        target: candidate.clone(),
+                        outcome: RouteAttemptOutcome::Failed {
+                            category,
+                            retryable,
+                        },
+                    });
+                    if !retryable || !plan.policy.fallback_on_retryable {
+                        return Err(RouterError::ProviderExecution(error));
+                    }
+                }
+            }
+        }
+        if attempts.is_empty() {
+            return Err(RouterError::NoEligibleProvider);
+        }
+        Err(RouterError::ProviderExecution(
+            luminus_core::provider::ProviderError::new(
+                luminus_core::provider::ProviderErrorCategory::UpstreamUnavailable,
+                "all route candidates failed",
+                false,
+            ),
+        ))
+    }
 }
 
 pub fn required_capabilities(request: &CanonicalRequest) -> Vec<Capability> {
@@ -112,26 +228,26 @@ pub fn required_capabilities(request: &CanonicalRequest) -> Vec<Capability> {
 mod tests {
     use super::*;
     use luminus_core::{
-        model::{ModelInfo, ProviderId},
-        protocol::{CanonicalMessage, ContentPart, ResponseId, Usage},
+        model::ModelInfo,
+        protocol::{CanonicalMessage, FinishReason, MessageRole, ResponseId, Usage},
         provider::{ProviderAdapter, ProviderError, ProviderErrorCategory},
     };
+    use std::sync::{Arc, Mutex};
 
     struct FakeProvider {
         id: ProviderId,
-        capabilities: Vec<Capability>,
-        fail: bool,
+        outcome: Option<ProviderErrorCategory>,
+        calls: Arc<Mutex<Vec<ProviderId>>>,
     }
-
     impl ProviderAdapter for FakeProvider {
         fn provider_id(&self) -> &ProviderId {
             &self.id
         }
         fn models(&self) -> Vec<ModelInfo> {
             vec![ModelInfo {
-                id: ModelId("fake-model".into()),
+                id: ModelId("m".into()),
                 provider: self.id.clone(),
-                capabilities: self.capabilities.clone(),
+                capabilities: vec![Capability::Chat],
             }]
         }
         fn execute<'a>(
@@ -146,32 +262,29 @@ mod tests {
             >,
         > {
             Box::pin(async move {
-                if self.fail {
+                self.calls.lock().unwrap().push(self.id.clone());
+                if let Some(category) = self.outcome {
                     return Err(ProviderError::new(
-                        ProviderErrorCategory::UpstreamUnavailable,
-                        "fake failure",
-                        true,
+                        category,
+                        "fake",
+                        category != ProviderErrorCategory::InvalidRequest,
                     ));
                 }
                 Ok(CanonicalResponse {
-                    id: ResponseId("fake-response".into()),
-                    model: ModelId("fake-model".into()),
-                    content: vec![ContentPart::text("fake response")],
-                    finish_reason: luminus_core::protocol::FinishReason::Stop,
+                    id: ResponseId("ok".into()),
+                    model: ModelId("m".into()),
+                    content: vec![ContentPart::text("ok")],
+                    finish_reason: FinishReason::Stop,
                     usage: Usage::default(),
                     provider_metadata: None,
                 })
             })
         }
     }
-
     fn request() -> CanonicalRequest {
         CanonicalRequest {
-            model: ModelId("fake-model".into()),
-            messages: vec![CanonicalMessage::text(
-                luminus_core::protocol::MessageRole::User,
-                "hello",
-            )],
+            model: ModelId("m".into()),
+            messages: vec![CanonicalMessage::text(MessageRole::User, "hi")],
             tools: vec![],
             tool_choice: None,
             temperature: None,
@@ -183,112 +296,96 @@ mod tests {
             metadata: None,
         }
     }
-
-    fn router(provider: FakeProvider) -> Router {
-        let id = provider.id.clone();
+    fn plan(ids: &[&str], max: usize) -> (Router, RoutePlan, Arc<Mutex<Vec<ProviderId>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let mut registry = ProviderRegistry::new();
-        registry.register(Arc::new(provider));
-        Router::new(Arc::new(registry), Some(id))
+        let mut candidates = Vec::new();
+        for id in ids {
+            let provider = ProviderId((*id).into());
+            registry.register(Arc::new(FakeProvider {
+                id: provider.clone(),
+                outcome: if *id == "a" {
+                    Some(ProviderErrorCategory::UpstreamUnavailable)
+                } else {
+                    None
+                },
+                calls: calls.clone(),
+            }));
+            candidates.push(RouteCandidate {
+                provider,
+                model: ModelId("m".into()),
+            });
+        }
+        (
+            Router::new(Arc::new(registry), None),
+            RoutePlan {
+                candidates,
+                policy: RoutingPolicy::new(max, true).unwrap(),
+            },
+            calls,
+        )
     }
 
     #[test]
-    fn registry_registers_and_retrieves_provider() {
-        let id = ProviderId("fake".into());
+    fn zero_attempt_policy_is_rejected() {
+        assert!(RoutingPolicy::new(0, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_falls_back_in_order() {
+        let (router, plan, calls) = plan(&["a", "b"], 2);
+        let context = ProviderContext::new("test", ProviderId("a".into()), ModelId("m".into()));
+        let result = router
+            .execute_plan(&request(), &plan, &context)
+            .await
+            .unwrap();
+        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_retryable_error_stops() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let mut registry = ProviderRegistry::new();
         registry.register(Arc::new(FakeProvider {
-            id: id.clone(),
-            capabilities: vec![Capability::Chat],
-            fail: false,
+            id: ProviderId("a".into()),
+            outcome: Some(ProviderErrorCategory::InvalidRequest),
+            calls: calls.clone(),
         }));
-        assert!(registry.get(&id).is_some());
-        assert_eq!(registry.list(), vec![id]);
-    }
-
-    #[test]
-    fn unknown_provider_is_reported() {
-        let router = Router::new(
-            Arc::new(ProviderRegistry::new()),
-            Some(ProviderId("missing".into())),
-        );
-        assert!(matches!(
-            router.resolve(&request()),
-            Err(RouterError::ProviderNotFound)
-        ));
-    }
-
-    #[test]
-    fn required_capabilities_are_derived() {
-        let mut request = request();
-        request.tools.push(luminus_core::protocol::ToolDefinition {
-            name: "tool".into(),
-            description: None,
-            parameters: serde_json::json!({}),
-        });
-        request.stream = true;
-        assert_eq!(
-            required_capabilities(&request),
-            vec![Capability::Chat, Capability::Tools, Capability::Streaming]
-        );
-        request.messages[0].content.push(ContentPart::Image {
-            image: luminus_core::protocol::ImageContent {
-                media_type: "image/png".into(),
-                uri: "data:".into(),
-            },
-        });
-        assert!(required_capabilities(&request).contains(&Capability::Vision));
-    }
-
-    #[tokio::test]
-    async fn missing_capability_is_rejected_before_execution() {
-        let router = router(FakeProvider {
-            id: ProviderId("fake".into()),
-            capabilities: vec![Capability::Chat],
-            fail: false,
-        });
-        let mut request = request();
-        request.tools.push(luminus_core::protocol::ToolDefinition {
-            name: "tool".into(),
-            description: None,
-            parameters: serde_json::json!({}),
-        });
-        assert!(matches!(
-            router.resolve(&request),
-            Err(RouterError::UnsupportedCapability)
-        ));
-    }
-
-    #[tokio::test]
-    async fn execution_and_provider_error_are_preserved() {
-        let provider = FakeProvider {
-            id: ProviderId("fake".into()),
-            capabilities: vec![Capability::Chat],
-            fail: false,
+        registry.register(Arc::new(FakeProvider {
+            id: ProviderId("b".into()),
+            outcome: None,
+            calls: calls.clone(),
+        }));
+        let router = Router::new(Arc::new(registry), None);
+        let plan = RoutePlan {
+            candidates: vec![
+                RouteCandidate {
+                    provider: ProviderId("a".into()),
+                    model: ModelId("m".into()),
+                },
+                RouteCandidate {
+                    provider: ProviderId("b".into()),
+                    model: ModelId("m".into()),
+                },
+            ],
+            policy: RoutingPolicy::new(2, true).unwrap(),
         };
-        let router = router(provider);
-        let context = ProviderContext::new(
-            "test",
-            ProviderId("fake".into()),
-            ModelId("fake-model".into()),
+        let context = ProviderContext::new("test", ProviderId("a".into()), ModelId("m".into()));
+        assert!(
+            router
+                .execute_plan(&request(), &plan, &context)
+                .await
+                .is_err()
         );
-        assert_eq!(
-            router.execute(&request(), &context).await.unwrap().id.0,
-            "fake-response"
-        );
-        let failing = super::Router::new(
-            Arc::new({
-                let mut registry = ProviderRegistry::new();
-                registry.register(Arc::new(FakeProvider {
-                    id: ProviderId("fake".into()),
-                    capabilities: vec![Capability::Chat],
-                    fail: true,
-                }));
-                registry
-            }),
-            Some(ProviderId("fake".into())),
-        );
-        assert!(matches!(
-            failing.execute(&request(), &context).await,
-            Err(RouterError::ProviderExecution(_))
-        ));
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 }

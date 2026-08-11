@@ -30,10 +30,18 @@ pub async fn chat_completions(
         target.provider.clone(),
         canonical.model.clone(),
     );
+    let plan = luminus_router::RoutePlan {
+        candidates: vec![luminus_router::RouteCandidate {
+            provider: target.provider,
+            model: canonical.model.clone(),
+        }],
+        policy: luminus_router::RoutingPolicy::new(1, false).map_err(router_error)?,
+    };
     let response = router
-        .execute(&canonical, &context)
+        .execute_plan(&canonical, &plan, &context)
         .await
-        .map_err(router_error)?;
+        .map_err(router_error)?
+        .response;
     ChatResponse::try_from(response).map(Json).map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,
@@ -49,6 +57,7 @@ fn router_error(error: RouterError) -> (StatusCode, Json<serde_json::Value>) {
         | RouterErrorCategory::NoEligibleProvider => StatusCode::SERVICE_UNAVAILABLE,
         RouterErrorCategory::UnsupportedCapability => StatusCode::NOT_IMPLEMENTED,
         RouterErrorCategory::ProviderExecution => StatusCode::BAD_GATEWAY,
+        RouterErrorCategory::InvalidPolicy => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
         status,

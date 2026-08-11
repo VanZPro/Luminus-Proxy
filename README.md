@@ -74,8 +74,9 @@ Rust migration phases:
 - R5: Blackbox execution hardening with bounded response handling and safe error parsing.
 - R6: experimental non-streaming OpenAI execution endpoint wired to the Blackbox adapter.
 - R7: provider-neutral router and registry foundation for the experimental endpoint.
+- R8: deterministic ordered fallback policy tested with fake providers; production still has only Blackbox.
 
-Blackbox is still the only real Rust provider. There is no fallback, retry loop, account pool, database, or streaming support yet. The experimental endpoint remains non-streaming and does not add production `/v1` routes; the existing TypeScript/Bun backend remains the production implementation.
+Blackbox is still the only real Rust provider. R8 fallback is test-only for now; there is no account pool, persistent cooldown, timed retry, database, or streaming support. The experimental endpoint remains non-streaming and does not add production `/v1` routes; the existing TypeScript/Bun backend remains the production implementation.
 
 ```bash
 cargo check --workspace
