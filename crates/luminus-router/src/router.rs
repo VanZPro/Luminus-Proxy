@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use luminus_core::{
     model::{AccountId, Capability, ModelId, ProviderId},
@@ -103,6 +103,13 @@ impl Router {
         let provider = self
             .registry
             .get(&provider_id)
+            .or_else(|| {
+                self.accounts
+                    .eligible_for_provider(&provider_id, &request.model)
+                    .into_iter()
+                    .next()
+                    .map(|account| account.adapter.clone())
+            })
             .ok_or(RouterError::ProviderNotFound)?;
         let model = provider
             .models()
@@ -142,7 +149,34 @@ impl Router {
         context: &ProviderContext,
     ) -> Result<RouteExecution, RouterError> {
         let mut attempts = Vec::new();
-        for candidate in plan.candidates.iter().take(plan.policy.max_attempts) {
+        let mut expanded = Vec::new();
+        for candidate in &plan.candidates {
+            if candidate.account.is_some() {
+                expanded.push(candidate.clone());
+            } else {
+                let accounts = self
+                    .accounts
+                    .eligible_for_provider(&candidate.provider, &candidate.model);
+                if !accounts.is_empty() {
+                    expanded.extend(accounts.into_iter().map(|account| RouteCandidate {
+                        provider: candidate.provider.clone(),
+                        model: candidate.model.clone(),
+                        account: Some(account.descriptor.id.clone()),
+                    }));
+                } else if self.registry.get(&candidate.provider).is_some() {
+                    expanded.push(candidate.clone());
+                }
+            }
+        }
+        let mut visited: HashSet<(String, String, Option<AccountId>)> = HashSet::new();
+        for candidate in expanded.iter().take(plan.policy.max_attempts) {
+            if !visited.insert((
+                candidate.provider.0.clone(),
+                candidate.model.0.clone(),
+                candidate.account.clone(),
+            )) {
+                continue;
+            }
             let (provider, account_id) = if let Some(account_id) = &candidate.account {
                 let Some(account) = self.accounts.get(account_id) else {
                     continue;
@@ -420,6 +454,47 @@ mod tests {
             .unwrap();
         assert_eq!(execution.attempts[0].account(), Some(&account_id));
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_level_candidate_expands_accounts_in_order() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let provider_id = ProviderId::from("fake");
+        let mut pool = AccountPool::new();
+        for id in ["a1", "a2"] {
+            pool.register(crate::ProviderAccount {
+                descriptor: luminus_core::model::AccountDescriptor {
+                    id: AccountId::from(id),
+                    provider: provider_id.clone(),
+                    enabled: true,
+                },
+                adapter: Arc::new(FakeProvider {
+                    id: provider_id.clone(),
+                    outcome: None,
+                    calls: calls.clone(),
+                }),
+            })
+            .unwrap();
+        }
+        let router =
+            Router::new(Arc::new(ProviderRegistry::new()), None).with_accounts(Arc::new(pool));
+        let plan = RoutePlan {
+            candidates: vec![RouteCandidate {
+                provider: provider_id.clone(),
+                model: ModelId("m".into()),
+                account: None,
+            }],
+            policy: RoutingPolicy::new(2, true).unwrap(),
+        };
+        let result = router
+            .execute_plan(
+                &request(),
+                &plan,
+                &ProviderContext::new("id", provider_id, ModelId("m".into())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.attempts[0].account(), Some(&AccountId::from("a1")));
     }
 
     #[tokio::test]

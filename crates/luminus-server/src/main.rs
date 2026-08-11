@@ -1,9 +1,12 @@
 mod app;
 mod routes;
 
-use luminus_core::{AppConfig, model::ProviderId};
+use luminus_core::{
+    AppConfig,
+    model::{AccountDescriptor, AccountId, ProviderId},
+};
 use luminus_providers::{BlackboxConfig, BlackboxProvider};
-use luminus_router::{ProviderRegistry, Router as LuminusRouter};
+use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
 use std::sync::Arc;
 use tracing::info;
 
@@ -28,15 +31,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))?)),
         _ => None,
     };
-    let mut registry = ProviderRegistry::new();
+    let registry = ProviderRegistry::new();
+    let mut account_pool = AccountPool::new();
     if let Some(provider) = provider {
-        registry.register(provider);
+        account_pool.register(ProviderAccount {
+            descriptor: AccountDescriptor {
+                id: AccountId::from("blackbox-default"),
+                provider: ProviderId::from("blackbox"),
+                enabled: true,
+            },
+            adapter: provider,
+        })?;
     }
-    let router = Arc::new(LuminusRouter::new(
-        Arc::new(registry),
-        Some(ProviderId("blackbox".into())),
-    ));
-    axum::serve(listener, app::experimental_app(router))
+    let router = LuminusRouter::new(Arc::new(registry), Some(ProviderId("blackbox".into())))
+        .with_accounts(Arc::new(account_pool));
+    axum::serve(listener, app::experimental_app(Arc::new(router)))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

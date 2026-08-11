@@ -11,8 +11,9 @@ pub struct ProviderAccount {
     pub adapter: Arc<dyn ProviderAdapter>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AccountPoolError {
+    #[error("duplicate account ID")]
     DuplicateAccount,
 }
 
