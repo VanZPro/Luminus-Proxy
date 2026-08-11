@@ -124,9 +124,14 @@ mod tests {
     use luminus_storage::AccountRepository;
     use std::{
         fs,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct Fixture {
         path: PathBuf,
@@ -137,8 +142,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path =
-                std::env::temp_dir().join(format!("luminus-r16-{nonce}-{}.db", std::process::id()));
+            let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "luminus-r16-{nonce}-{}-{sequence}.db",
+                std::process::id()
+            ));
             let db = Connection::open(&path).unwrap();
             db.execute_batch(schema).unwrap();
             drop(db);

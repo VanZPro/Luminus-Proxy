@@ -85,8 +85,11 @@ Rust migration phases:
 - R16: read-only TypeScript account metadata compatibility adapter validated against synthetic fixtures.
 - R17: credential/encryption architecture audit and typed secret-resolution boundary.
 - R18: synthetic legacy encrypted-password compatibility reader and decoder.
+- R19: provider-specific typed legacy credential resolution using synthetic fixtures.
 
 R18 supports read-only compatibility with the verified TypeScript XOR/Base64 `accounts.password` format using an explicitly supplied synthetic key. It does not encrypt new Rust secrets with this legacy format, open a production database, read the production `ENCRYPTION_KEY`, parse tokens or metadata, or wire credentials into the server. Only synthetic fixtures are tested; the TypeScript backend remains production.
+
+R19 adds an offline typed legacy BYOK credential resolver. It reads only synthetic encrypted password rows, requires an explicit key, does not read tokens or metadata, does not hydrate AccountPool, does not add provider transport, and does not wire the server. The TypeScript backend remains production.
 
 R15 uses an explicit database path and a separate SQLite adapter crate with a minimal Rust-native schema. R16 adds a separate read-only adapter for the TypeScript `accounts` metadata projection. R17 adds only architecture foundations: source-only credential/encryption audit, redacted `SecretString`, and a typed synthetic resolver contract. No production credentials were read, no production database was opened, no decryption implementation or server credential loading was added, and the existing Blackbox environment configuration remains active. The TypeScript/Bun backend remains production.
 

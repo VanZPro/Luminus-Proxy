@@ -10,6 +10,7 @@ members = [
     "crates/luminus-storage-sqlite",
     "crates/luminus-secrets",
     "crates/luminus-legacy-credentials",
+    "crates/luminus-composition",
 ]
 
 [workspace.package]

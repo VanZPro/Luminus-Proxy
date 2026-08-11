@@ -1,0 +1,19 @@
+[package]
+name = "luminus-composition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+luminus-core = { path = "../luminus-core" }
+luminus-secrets = { path = "../luminus-secrets" }
+luminus-legacy-credentials = { path = "../luminus-legacy-credentials" }
+thiserror.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

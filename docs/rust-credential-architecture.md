@@ -49,3 +49,17 @@ The R18 decoder accepts `LegacyCiphertext` and an explicitly supplied `SecretStr
 `LegacyPasswordReader` receives an explicit `PathBuf`, opens with `SQLITE_OPEN_READ_ONLY`, uses `spawn_blocking`, and selects only `id, provider, password FROM accounts ORDER BY id`. Lookups use bound parameters and reuse the R16 `legacy-ts:<numeric-id>` mapping. It does not select or parse email, tokens, metadata, quota, or other fields. Synthetic temporary fixtures cover fixed vectors, malformed Base64, empty keys, redaction, read-only SQL projection, deterministic lookup, and end-to-end decode to `SecretString`.
 
 This XOR format has no nonce, authentication tag, integrity protection, or version marker. A wrong key can produce valid UTF-8, so successful decoding does not prove key correctness. Tokens, metadata, provider interpretation, production key policy, and production database access remain deferred.
+
+## R19: typed provider-specific legacy resolution
+
+### Observed TypeScript behavior
+
+The source audit selected the `byok` mode as the simplest password-only interpretation. The 9router migration maps Blackbox and OpenAI-compatible connections to `byok`, and writes `data.apiKey` (or another imported token fallback) into encrypted `accounts.password`. The migration also writes provider-specific `tokens`, so R19 intentionally relies only on the password-only BYOK interpretation and does not claim to reproduce all imported connection semantics. Browser-login providers such as Kiro, Qoder, and GitLab Duo are deferred because their useful credentials depend on tokens, metadata, email/password, cookies, PAT distinctions, or refresh/session state.
+
+### New Rust architecture
+
+`crates/luminus-composition` owns `ByokCredentials { api_key: SecretString }` and `LegacyByokResolver`. The resolver implements `CredentialResolver<ByokCredentials>`, receives an explicit `LegacyPasswordReader` and `SecretString` legacy key, validates both the request provider and stored row provider, reads the encrypted password, decodes it, and returns the typed credential. Provider mismatches and decoder/storage failures map to safe `SecretError` categories without exposing values. The credential type has no raw public secret field and its Debug output remains redacted through `SecretString`.
+
+R19 tests use temporary synthetic accounts databases and fake API-key values only. They cover typed interpretation, trait-object resolution, missing and foreign IDs, request/row provider mismatches, malformed ciphertext, empty explicit keys, redacted Debug, and isolation. No tokens or metadata are selected by the reader, and no resolver path performs HTTP, writes, server wiring, AccountPool hydration, or production access.
+
+R19 stops at `ConcreteCredentials`. The next boundary is isolated synthetic startup hydration into `ProviderAccount` and `AccountPool`; it is not implemented here.
