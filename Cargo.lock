@@ -527,8 +527,11 @@ dependencies = [
 name = "luminus-router"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "luminus-core",
  "luminus-protocols",
+ "luminus-providers",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

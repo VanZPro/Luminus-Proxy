@@ -9,7 +9,10 @@ luminus-core = { path = "../luminus-core" }
 thiserror.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 luminus-protocols = { path = "../luminus-protocols" }
+luminus-providers = { path = "../luminus-providers" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
