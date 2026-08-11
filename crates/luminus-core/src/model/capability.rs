@@ -15,6 +15,12 @@ pub struct ModelId(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderId(pub String);
 
+impl From<&str> for ProviderId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelInfo {
     pub id: ModelId,

@@ -1,11 +1,11 @@
-use crate::model::{ModelId, ProviderId};
+use crate::model::{AccountId, ModelId, ProviderId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderContext {
     pub request_id: String,
     pub provider_id: ProviderId,
     pub model_id: ModelId,
-    pub account_id: Option<String>,
+    pub account_id: Option<AccountId>,
 }
 
 impl ProviderContext {

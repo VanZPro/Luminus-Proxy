@@ -34,6 +34,7 @@ pub async fn chat_completions(
         candidates: vec![luminus_router::RouteCandidate {
             provider: target.provider,
             model: canonical.model.clone(),
+            account: None,
         }],
         policy: luminus_router::RoutingPolicy::new(1, false).map_err(router_error)?,
     };

@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use luminus_core::{
-    model::{Capability, ModelId, ProviderId},
+    model::{AccountId, Capability, ModelId, ProviderId},
     protocol::{CanonicalRequest, CanonicalResponse, ContentPart},
     provider::ProviderContext,
 };
 
-use crate::{ProviderRegistry, RouterError};
+use crate::{AccountPool, ProviderRegistry, RouterError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteCandidate {
     pub provider: ProviderId,
     pub model: ModelId,
+    pub account: Option<AccountId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,12 @@ pub struct RouteAttempt {
     pub outcome: RouteAttemptOutcome,
 }
 
+impl RouteAttempt {
+    pub fn account(&self) -> Option<&AccountId> {
+        self.target.account.as_ref()
+    }
+}
+
 #[derive(Debug)]
 pub struct RouteExecution {
     pub response: CanonicalResponse,
@@ -64,11 +71,13 @@ pub struct RouteExecution {
 pub struct RouteTarget {
     pub provider: ProviderId,
     pub model: ModelId,
+    pub account: Option<AccountId>,
 }
 
 #[derive(Clone)]
 pub struct Router {
     registry: Arc<ProviderRegistry>,
+    accounts: Arc<AccountPool>,
     default_provider: Option<ProviderId>,
 }
 
@@ -76,8 +85,14 @@ impl Router {
     pub fn new(registry: Arc<ProviderRegistry>, default_provider: Option<ProviderId>) -> Self {
         Self {
             registry,
+            accounts: Arc::new(AccountPool::new()),
             default_provider,
         }
+    }
+
+    pub fn with_accounts(mut self, accounts: Arc<AccountPool>) -> Self {
+        self.accounts = accounts;
+        self
     }
 
     pub fn resolve(&self, request: &CanonicalRequest) -> Result<RouteTarget, RouterError> {
@@ -103,6 +118,7 @@ impl Router {
         Ok(RouteTarget {
             provider: provider_id,
             model: model.id,
+            account: None,
         })
     }
 
@@ -127,8 +143,20 @@ impl Router {
     ) -> Result<RouteExecution, RouterError> {
         let mut attempts = Vec::new();
         for candidate in plan.candidates.iter().take(plan.policy.max_attempts) {
-            let Some(provider) = self.registry.get(&candidate.provider) else {
-                continue;
+            let (provider, account_id) = if let Some(account_id) = &candidate.account {
+                let Some(account) = self.accounts.get(account_id) else {
+                    continue;
+                };
+                if !account.descriptor.enabled || account.descriptor.provider != candidate.provider
+                {
+                    continue;
+                }
+                (account.adapter.clone(), Some(account_id.clone()))
+            } else {
+                let Some(provider) = self.registry.get(&candidate.provider) else {
+                    continue;
+                };
+                (provider, None)
             };
             let Some(model) = provider
                 .models()
@@ -143,7 +171,9 @@ impl Router {
             {
                 continue;
             }
-            match provider.execute(request, context).await {
+            let mut account_context = context.clone();
+            account_context.account_id = account_id;
+            match provider.execute(request, &account_context).await {
                 Ok(response) => {
                     attempts.push(RouteAttempt {
                         target: candidate.clone(),
@@ -314,6 +344,7 @@ mod tests {
             candidates.push(RouteCandidate {
                 provider,
                 model: ModelId("m".into()),
+                account: None,
             });
         }
         (
@@ -352,6 +383,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_account_candidate_uses_account_adapter_and_history() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let provider_id = ProviderId::from("fake");
+        let account_id = AccountId::from("account-a");
+        let adapter = Arc::new(FakeProvider {
+            id: provider_id.clone(),
+            outcome: None,
+            calls: calls.clone(),
+        });
+        let mut accounts = AccountPool::new();
+        accounts
+            .register(crate::ProviderAccount {
+                descriptor: luminus_core::model::AccountDescriptor {
+                    id: account_id.clone(),
+                    provider: provider_id.clone(),
+                    enabled: true,
+                },
+                adapter,
+            })
+            .unwrap();
+        let router =
+            Router::new(Arc::new(ProviderRegistry::new()), None).with_accounts(Arc::new(accounts));
+        let plan = RoutePlan {
+            candidates: vec![RouteCandidate {
+                provider: provider_id.clone(),
+                model: ModelId("m".into()),
+                account: Some(account_id.clone()),
+            }],
+            policy: RoutingPolicy::new(1, true).unwrap(),
+        };
+        let context = ProviderContext::new("test", provider_id, ModelId("m".into()));
+        let execution = router
+            .execute_plan(&request(), &plan, &context)
+            .await
+            .unwrap();
+        assert_eq!(execution.attempts[0].account(), Some(&account_id));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn non_retryable_error_stops() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut registry = ProviderRegistry::new();
@@ -371,10 +442,12 @@ mod tests {
                 RouteCandidate {
                     provider: ProviderId("a".into()),
                     model: ModelId("m".into()),
+                    account: None,
                 },
                 RouteCandidate {
                     provider: ProviderId("b".into()),
                     model: ModelId("m".into()),
+                    account: None,
                 },
             ],
             policy: RoutingPolicy::new(2, true).unwrap(),
