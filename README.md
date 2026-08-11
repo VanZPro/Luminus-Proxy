@@ -81,8 +81,11 @@ Rust migration phases:
 - R12: deterministic account selection with FirstEligible and RoundRobin policies.
 - R13: separate same-target retryability from cross-target fallbackability.
 - R14: storage/persistence boundary and TypeScript database architecture audit.
+- R15: isolated SQLite account metadata adapter validated only against temporary Rust-owned test databases.
 
-R14 adds no database driver, does not read or write the production database, and performs no schema migration. The runtime `AccountPool` remains in-memory, secret persistence is deferred, and the TypeScript/Bun backend remains production. Blackbox is still the only real Rust provider.
+R15 uses an explicit database path and a separate SQLite adapter crate with a minimal Rust-native schema. The production TypeScript database is untouched and the adapter is not yet production-schema compatible. Rust does not persist credentials, and the server still uses environment-backed Blackbox configuration. The TypeScript/Bun backend remains production.
+
+R14/R15 do not migrate the production database. The runtime `AccountPool` remains in-memory, secret persistence is deferred, and Blackbox is still the only real Rust provider.
 
 ```bash
 cargo check --workspace

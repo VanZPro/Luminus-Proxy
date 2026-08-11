@@ -50,9 +50,19 @@ The contract uses `Pin<Box<dyn Future<...> + Send + 'a>>` and does not add `asyn
 
 Future startup composition should load `StoredAccount` records, resolve provider-specific configuration and secrets through a separate provider/infrastructure boundary, construct `ProviderAccount` adapters, register them into the runtime `AccountPool`, and then give that pool to Router. Router must never query storage during request routing.
 
-## Deferred work / recommended R15
+## R15 isolated SQLite adapter
 
-Credential persistence and decryption APIs are deferred until the TypeScript secret boundary is verified. Provider configuration repositories, settings repositories, quota models, telemetry migration, schema compatibility handling, and SQLite adapters are also deferred. R15 should implement an isolated SQLite adapter against temporary test databases only, without reading or migrating the production TypeScript database.
+`luminus-storage-sqlite` implements the R14 repository contract behind a separate crate. It requires an explicit `PathBuf`; it does not discover or default to the TypeScript database path. The adapter opens a connection per operation and runs synchronous rusqlite work inside `tokio::task::spawn_blocking`, so SQLite work is not performed directly on Tokio worker threads and no SQLite mutex is held across awaits.
+
+R15 uses rusqlite 0.32.1 with the `bundled` feature. Its tests create temporary, uniquely named files and remove them through an RAII helper. The test-only Rust-owned schema is `luminus_accounts(id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, enabled INTEGER NOT NULL)`. It contains no credentials, quota, cooldown, selection, or request-history fields.
+
+Queries use bound parameters. Listing uses explicit `ORDER BY id` for deterministic loading behavior; this is not a final persisted routing priority contract. Enabled accepts only SQLite integer values 0 and 1. Missing lookups return `Ok(None)`. Malformed values fail the load rather than being skipped. SQLite/open failures map into generic `StorageError` categories without exposing raw diagnostics through the repository API.
+
+This adapter is not production-TypeScript-schema compatible. It does not initialize or migrate schemas implicitly, does not wire into the server, and does not open the production database. Future compatibility work must use synthetic fixtures or an explicitly isolated database.
+
+## Deferred work / recommended R16
+
+Credential persistence and decryption APIs are deferred until the TypeScript secret boundary is verified. Provider configuration repositories, settings repositories, quota models, telemetry migration, and production-schema compatibility are also deferred. R16 should build a read-only compatibility adapter for the existing TypeScript account schema against synthetic fixtures, without opening the production database.
 
 The TypeScript/Bun backend and its Blackbox environment configuration remain production and unchanged.
 
@@ -60,4 +70,4 @@ The TypeScript/Bun backend and its Blackbox environment configuration remain pro
 
 No TypeScript files were modified. No database dependency, SQL, production database access, migration, provider migration, auth migration, streaming, production route, or routing semantic change was made.
 
-Recommended next phase: R15 implement an isolated SQLite storage adapter against temporary test databases, without reading or migrating the production TypeScript database.
+Recommended next phase: R16 build a read-only compatibility adapter for the existing TypeScript account schema against synthetic fixtures, without opening the production database.

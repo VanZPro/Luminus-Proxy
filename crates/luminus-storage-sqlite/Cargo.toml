@@ -1,0 +1,14 @@
+[package]
+name = "luminus-storage-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+luminus-storage = { path = "../luminus-storage" }
+luminus-core = { path = "../luminus-core" }
+rusqlite.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

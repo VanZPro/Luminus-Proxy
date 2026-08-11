@@ -7,6 +7,7 @@ members = [
     "crates/luminus-providers",
     "crates/luminus-router",
     "crates/luminus-storage",
+    "crates/luminus-storage-sqlite",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
