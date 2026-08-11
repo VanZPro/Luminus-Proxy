@@ -1,73 +1,33 @@
-# R14 Rust Storage Boundary
+# Rust Storage Architecture
 
-## Scope
+## R16 read-only TypeScript account compatibility
 
-R14 is an architecture audit and persistence boundary foundation. It does not open, read, migrate, or write the existing production database. No Rust database driver or SQL is introduced.
+R16 adds `LegacyTsAccountRepository` in `crates/luminus-storage-sqlite/src/legacy_ts.rs`. It implements the existing `AccountRepository` contract and requires an explicit database `PathBuf`; it does not discover, configure, or default to any production database path.
 
-## TypeScript persistence audit
+The current TypeScript source of truth is `src/db/schema.ts`: table `accounts`, integer auto-increment primary key `id`, required text `provider`, required text `email`, required text `password`, required text `status`, required integer `enabled` represented by Drizzle boolean mode as SQLite `0` or `1`, optional token JSON, quota/counter/timestamp fields, error text, metadata JSON, and timestamps. The `(provider, email)` unique index is provider-scoped. `src/db/migrate.ts` also adds newer account free-counter columns idempotently; historical deployments can therefore have migration drift. R16 requires the current selected metadata columns and does not support every historical state.
 
-The current backend uses Bun SQLite through `bun:sqlite` and Drizzle (`src/db/index.ts`). Initialization creates the configured parent directory, opens the configured database path, enables WAL mode, and enables foreign keys. The path comes from runtime configuration; this audit did not open the database or inspect secret values.
+The adapter selects only:
 
-`src/db/schema.ts` defines these relevant areas:
+```sql
+SELECT id, provider, enabled FROM accounts ORDER BY id
+```
 
-- `accounts`: integer auto-increment ID, provider, email, encrypted password field, status, enabled flag, token JSON, quota counters/reset timestamps, usage/login timestamps, error text, provider-specific metadata JSON, and created/updated timestamps. `(provider, email)` is unique.
-- `request_logs` and `usage_summary`: request and aggregate telemetry, including token/credit usage and account references. These are history/observability, not runtime routing state.
-- `settings`: application-wide key/value settings with an updated timestamp. It is not account metadata.
-- `model_mappings`, `api_keys`, `proxy_pool`, filters, image-studio data, and VCC tables: separate application concerns, not part of the Rust account repository.
+`get_account` uses the same projection and a bound `WHERE id = ?1` parameter. There is no `SELECT *`. Password, email, tokens, quotas, timestamps, error text, and provider-specific metadata are never selected or parsed. Unknown extra columns do not affect the projection.
 
-Foreign keys are enabled at connection initialization. Account references in request/VCC transaction records have no explicit cascade action (SQLite default behavior); image results explicitly use `ON DELETE SET NULL`. The account uniqueness constraint is provider-scoped.
+Legacy numeric IDs are encoded deterministically as `legacy-ts:<non-negative decimal id>`. This namespace avoids collision with native IDs, is independent of credentials, and is reversible for lookup. Non-legacy or malformed IDs return `Ok(None)`. Listing order is ascending legacy primary-key order only; it is not routing priority or account preference.
 
-`src/db/migrate.ts` conditionally runs file migrations only when the Drizzle journal exists, then runs an ordered list of idempotent column-add operations on every invocation. The migration folder is documented as gitignored, so fresh deployments may skip file migrations and rely on the idempotent additions or `db:push`. This is a compatibility hazard for any future adapter and needs verification before reuse.
+Each operation runs synchronous rusqlite work in `tokio::task::spawn_blocking`, opens a new connection with `SQLITE_OPEN_READ_ONLY`, executes the read, and closes the connection. The compatibility adapter contains no mutation SQL, migration, schema repair, or credential reader. Missing table/selected column and malformed selected values map to `StorageError::CorruptData`; missing records return `Ok(None)`; open failures remain generic and do not expose paths.
 
-## Ownership classification
+Tests create unique temporary synthetic SQLite fixtures, populate only fake sentinel values, and remove them through RAII cleanup. They cover current-shape listing and lookup, both enabled values, multiple providers including unsupported provider names, deterministic ordering, secret-column isolation, extra columns, missing table/column, malformed values, ID mapping, foreign IDs, `Arc<dyn AccountRepository>`, and fixture isolation. The production TypeScript database was not opened and no production data was read.
 
-Generic persisted metadata is limited to account identity, provider identity, and enabled state in R14. Provider, email, status, timestamps, error text, and metadata remain legacy/provider/application fields until their domain meaning is verified.
+This compatibility claim means only that the safe account metadata projection can be read from a synthetic fixture modeled on the current TypeScript account schema. It does not provide credentials, token authentication, quotas, metadata, historical-schema compatibility, migration, provider hydration, `ProviderAccount`, `AccountPool`, startup wiring, or server integration. Credential encryption/key-source verification and the future provider-specific secret-resolution boundary remain deferred.
 
-Provider-specific configuration includes the existing account metadata JSON and provider-specific account behavior. No generic Rust configuration map is introduced.
-
-Secrets include the account password and token JSON containing access/refresh authentication material, plus API keys and VCC data in their respective tables. The schema comments describe the password as encrypted, but the encryption/decryption implementation and key source require further verification; this audit did not print values or migrate the behavior. Decrypted credentials must be supplied only to provider-specific composition code.
-
-Quota fields and Qoder free counters are persisted snapshots/counters tied to provider behavior and warmup synchronization. They are not ported to a generic Rust quota model. Request history, usage summaries, and last-used/login timestamps are persisted telemetry or derived state, not Router state.
-
-`AccountHealthStore`, cooldown deadlines, last error categories, RoundRobin cursors, and request attempt history remain process-local runtime state and are not persisted.
-
-## Rust boundary
-
-The new `luminus-storage` crate depends only on `luminus-core` and `thiserror`. It does not depend on Router, Server, Axum, reqwest, provider implementations, TypeScript, or a database driver. Router has no storage dependency.
-
-`StoredAccount` deliberately contains only `AccountId`, `ProviderId`, and `enabled`; it has no credential/configuration catch-all field. It converts to the existing `AccountDescriptor` without introducing runtime state. The types are separate because one is a persistence record and the other is a runtime descriptor, while sharing the same minimal semantic fields.
-
-`AccountRepository` is a small read-oriented, object-safe async-compatible trait:
-
-- `list_accounts()`
-- `get_account(&AccountId)` returning `Result<Option<StoredAccount>, StorageError>`; missing records are represented by `None`.
-
-The contract uses `Pin<Box<dyn Future<...> + Send + 'a>>` and does not add `async-trait`. `StorageError` is intentionally small and does not expose SQL errors, paths, or credentials.
-
-## Memory repository and hydration
-
-`MemoryAccountRepository` preserves input order, performs deterministic ID lookup, and rejects duplicate IDs with `InvalidRecord`. It represents persisted records and is not `AccountPool`: it has no adapters, health, cooldown, or selection cursor. Tests are fully offline and also verify use behind `Arc<dyn AccountRepository>`.
-
-Future startup composition should load `StoredAccount` records, resolve provider-specific configuration and secrets through a separate provider/infrastructure boundary, construct `ProviderAccount` adapters, register them into the runtime `AccountPool`, and then give that pool to Router. Router must never query storage during request routing.
+The existing Rust-native `SqliteAccountRepository` and its `luminus_accounts` schema remain separate and unchanged. `luminus-storage` remains database-independent, Router and Server have no database dependency, Blackbox remains environment-backed, and the TypeScript/Bun backend remains production.
 
 ## R15 isolated SQLite adapter
 
-`luminus-storage-sqlite` implements the R14 repository contract behind a separate crate. It requires an explicit `PathBuf`; it does not discover or default to the TypeScript database path. The adapter opens a connection per operation and runs synchronous rusqlite work inside `tokio::task::spawn_blocking`, so SQLite work is not performed directly on Tokio worker threads and no SQLite mutex is held across awaits.
+R15's Rust-owned adapter uses an explicit path, per-operation connections, `spawn_blocking`, bound parameters, and deterministic `ORDER BY id`. It is not TypeScript-schema compatible and was validated only against temporary Rust-owned fixtures.
 
-R15 uses rusqlite 0.32.1 with the `bundled` feature. Its tests create temporary, uniquely named files and remove them through an RAII helper. The test-only Rust-owned schema is `luminus_accounts(id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, enabled INTEGER NOT NULL)`. It contains no credentials, quota, cooldown, selection, or request-history fields.
+## R14 boundary
 
-Queries use bound parameters. Listing uses explicit `ORDER BY id` for deterministic loading behavior; this is not a final persisted routing priority contract. Enabled accepts only SQLite integer values 0 and 1. Missing lookups return `Ok(None)`. Malformed values fail the load rather than being skipped. SQLite/open failures map into generic `StorageError` categories without exposing raw diagnostics through the repository API.
-
-This adapter is not production-TypeScript-schema compatible. It does not initialize or migrate schemas implicitly, does not wire into the server, and does not open the production database. Future compatibility work must use synthetic fixtures or an explicitly isolated database.
-
-## Deferred work / recommended R16
-
-Credential persistence and decryption APIs are deferred until the TypeScript secret boundary is verified. Provider configuration repositories, settings repositories, quota models, telemetry migration, and production-schema compatibility are also deferred. R16 should build a read-only compatibility adapter for the existing TypeScript account schema against synthetic fixtures, without opening the production database.
-
-The TypeScript/Bun backend and its Blackbox environment configuration remain production and unchanged.
-
-## R14 safety result
-
-No TypeScript files were modified. No database dependency, SQL, production database access, migration, provider migration, auth migration, streaming, production route, or routing semantic change was made.
-
-Recommended next phase: R16 build a read-only compatibility adapter for the existing TypeScript account schema against synthetic fixtures, without opening the production database.
+`StoredAccount` contains only `AccountId`, `ProviderId`, and `enabled`. Storage is metadata persistence, not runtime provider execution or routing state. Credentials, settings, API keys, quotas, telemetry migration, and provider hydration remain separate deferred boundaries.
