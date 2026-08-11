@@ -76,8 +76,10 @@ Rust migration phases:
 - R7: provider-neutral router and registry foundation for the experimental endpoint.
 - R8: deterministic ordered fallback policy tested with fake providers; production still has only Blackbox.
 - R9: provider/account separation and in-memory account-pool foundation.
+- R10: deterministic account-level routing and fallback.
+- R11: in-memory account health and cooldown eligibility.
 
-Blackbox is still the only real Rust provider. R9 account state is memory-only: there is no database migration, quota model, account cooldown, round-robin rotation, timed retry, or streaming support. Production multi-account routing is not enabled yet. The experimental endpoint remains non-streaming and does not add production `/v1` routes; the existing TypeScript/Bun backend remains the production implementation.
+Blackbox is still the only real Rust provider. R9-R11 account state is process-local: restart clears cooldowns; there is no database health persistence, background timer, quota-aware routing, round-robin rotation, timed retry, or streaming support.
 
 ```bash
 cargo check --workspace

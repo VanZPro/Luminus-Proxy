@@ -6,7 +6,10 @@ use luminus_core::{
     provider::ProviderContext,
 };
 
-use crate::{AccountPool, ProviderRegistry, RouterError};
+use crate::{
+    AccountHealthStore, AccountPool, Clock, CooldownPolicy, ProviderRegistry, RouterError,
+    SystemClock,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteCandidate {
@@ -79,6 +82,9 @@ pub struct Router {
     registry: Arc<ProviderRegistry>,
     accounts: Arc<AccountPool>,
     default_provider: Option<ProviderId>,
+    health: AccountHealthStore,
+    clock: Arc<dyn Clock>,
+    cooldown_policy: CooldownPolicy,
 }
 
 impl Router {
@@ -87,12 +93,25 @@ impl Router {
             registry,
             accounts: Arc::new(AccountPool::new()),
             default_provider,
+            health: AccountHealthStore::new(),
+            clock: Arc::new(SystemClock),
+            cooldown_policy: CooldownPolicy::new(),
         }
     }
 
     pub fn with_accounts(mut self, accounts: Arc<AccountPool>) -> Self {
         self.accounts = accounts;
         self
+    }
+
+    pub fn with_health(mut self, health: AccountHealthStore, clock: Arc<dyn Clock>) -> Self {
+        self.health = health;
+        self.clock = clock;
+        self
+    }
+
+    pub fn health(&self) -> &AccountHealthStore {
+        &self.health
     }
 
     pub fn resolve(&self, request: &CanonicalRequest) -> Result<RouteTarget, RouterError> {
@@ -158,11 +177,19 @@ impl Router {
                     .accounts
                     .eligible_for_provider(&candidate.provider, &candidate.model);
                 if !accounts.is_empty() {
-                    expanded.extend(accounts.into_iter().map(|account| RouteCandidate {
-                        provider: candidate.provider.clone(),
-                        model: candidate.model.clone(),
-                        account: Some(account.descriptor.id.clone()),
-                    }));
+                    expanded.extend(
+                        accounts
+                            .into_iter()
+                            .filter(|account| {
+                                self.health
+                                    .is_eligible(&account.descriptor.id, self.clock.now())
+                            })
+                            .map(|account| RouteCandidate {
+                                provider: candidate.provider.clone(),
+                                model: candidate.model.clone(),
+                                account: Some(account.descriptor.id.clone()),
+                            }),
+                    );
                 } else if self.registry.get(&candidate.provider).is_some() {
                     expanded.push(candidate.clone());
                 }
@@ -188,6 +215,9 @@ impl Router {
                 {
                     continue;
                 }
+                if !self.health.is_eligible(account_id, self.clock.now()) {
+                    continue;
+                }
                 (account.adapter.clone(), Some(account_id.clone()))
             } else {
                 let Some(provider) = self.registry.get(&candidate.provider) else {
@@ -209,7 +239,7 @@ impl Router {
                 continue;
             }
             let mut account_context = context.clone();
-            account_context.account_id = account_id;
+            account_context.account_id = account_id.clone();
             match provider.execute(request, &account_context).await {
                 Ok(response) => {
                     attempts.push(RouteAttempt {
@@ -223,6 +253,14 @@ impl Router {
                     });
                 }
                 Err(error) => {
+                    if let Some(account_id) = &account_id {
+                        self.health.record(
+                            account_id,
+                            &error,
+                            self.clock.now(),
+                            &self.cooldown_policy,
+                        );
+                    }
                     let retryable = error.retryable;
                     let category = error.category;
                     attempts.push(RouteAttempt {

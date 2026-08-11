@@ -1,10 +1,12 @@
 mod accounts;
 mod error;
+mod health;
 mod registry;
 mod router;
 
 pub use accounts::{AccountPool, AccountPoolError, ProviderAccount};
 pub use error::{RouterError, RouterErrorCategory};
+pub use health::{AccountHealthStore, AccountRuntimeState, Clock, CooldownPolicy, SystemClock};
 pub use registry::ProviderRegistry;
 pub use router::{
     RouteAttempt, RouteAttemptOutcome, RouteCandidate, RouteExecution, RoutePlan, RouteTarget,
