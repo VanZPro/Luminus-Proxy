@@ -584,6 +584,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-legacy-provider-config"
+version = "0.1.0"
+dependencies = [
+ "luminus-core",
+ "luminus-provider-config",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "luminus-protocols"
 version = "0.1.0"
 dependencies = [

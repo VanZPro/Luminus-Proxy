@@ -12,6 +12,7 @@ members = [
     "crates/luminus-legacy-credentials",
     "crates/luminus-composition",
     "crates/luminus-provider-config",
+    "crates/luminus-legacy-provider-config",
 ]
 
 [workspace.package]
