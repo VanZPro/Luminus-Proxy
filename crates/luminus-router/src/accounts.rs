@@ -49,6 +49,13 @@ impl AccountPool {
             .collect()
     }
 
+    pub fn ordered_ids_for_provider(&self, provider: &ProviderId) -> Vec<AccountId> {
+        self.list_for_provider(provider)
+            .into_iter()
+            .map(|account| account.descriptor.id.clone())
+            .collect()
+    }
+
     pub fn eligible_for_provider(
         &self,
         provider: &ProviderId,

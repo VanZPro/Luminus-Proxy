@@ -7,8 +7,8 @@ use luminus_core::{
 };
 
 use crate::{
-    AccountHealthStore, AccountPool, Clock, CooldownPolicy, ProviderRegistry, RouterError,
-    SystemClock,
+    AccountHealthStore, AccountPool, AccountSelectionStrategy, AccountSelector, Clock,
+    CooldownPolicy, ProviderRegistry, RouterError, SystemClock,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +85,7 @@ pub struct Router {
     health: AccountHealthStore,
     clock: Arc<dyn Clock>,
     cooldown_policy: CooldownPolicy,
+    selector: AccountSelector,
 }
 
 impl Router {
@@ -96,6 +97,7 @@ impl Router {
             health: AccountHealthStore::new(),
             clock: Arc::new(SystemClock),
             cooldown_policy: CooldownPolicy::new(),
+            selector: AccountSelector::new(AccountSelectionStrategy::FirstEligible),
         }
     }
 
@@ -107,6 +109,11 @@ impl Router {
     pub fn with_health(mut self, health: AccountHealthStore, clock: Arc<dyn Clock>) -> Self {
         self.health = health;
         self.clock = clock;
+        self
+    }
+
+    pub fn with_account_selection(mut self, strategy: AccountSelectionStrategy) -> Self {
+        self.selector = AccountSelector::new(strategy);
         self
     }
 
@@ -177,19 +184,24 @@ impl Router {
                     .accounts
                     .eligible_for_provider(&candidate.provider, &candidate.model);
                 if !accounts.is_empty() {
-                    expanded.extend(
-                        accounts
-                            .into_iter()
-                            .filter(|account| {
-                                self.health
-                                    .is_eligible(&account.descriptor.id, self.clock.now())
-                            })
-                            .map(|account| RouteCandidate {
-                                provider: candidate.provider.clone(),
-                                model: candidate.model.clone(),
-                                account: Some(account.descriptor.id.clone()),
-                            }),
+                    let eligible_ids = accounts
+                        .into_iter()
+                        .filter(|account| {
+                            self.health
+                                .is_eligible(&account.descriptor.id, self.clock.now())
+                        })
+                        .map(|account| account.descriptor.id.clone())
+                        .collect();
+                    let ordered_ids = self.selector.select(
+                        &candidate.provider,
+                        eligible_ids,
+                        self.accounts.ordered_ids_for_provider(&candidate.provider),
                     );
+                    expanded.extend(ordered_ids.into_iter().map(|account_id| RouteCandidate {
+                        provider: candidate.provider.clone(),
+                        model: candidate.model.clone(),
+                        account: Some(account_id),
+                    }));
                 } else if self.registry.get(&candidate.provider).is_some() {
                     expanded.push(candidate.clone());
                 }

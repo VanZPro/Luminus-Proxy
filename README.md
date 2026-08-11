@@ -78,8 +78,9 @@ Rust migration phases:
 - R9: provider/account separation and in-memory account-pool foundation.
 - R10: deterministic account-level routing and fallback.
 - R11: in-memory account health and cooldown eligibility.
+- R12: deterministic account selection with FirstEligible and RoundRobin policies.
 
-Blackbox is still the only real Rust provider. R9-R11 account state is process-local: restart clears cooldowns; there is no database health persistence, background timer, quota-aware routing, round-robin rotation, timed retry, or streaming support.
+Blackbox is still the only real Rust provider. R9-R12 account state is process-local: restart clears cooldowns and selection cursors; health filtering occurs before selection; there is no database persistence, background timer, quota-aware, weighted, or random routing, timed retry, or streaming support. FirstEligible remains the server default; RoundRobin is selectable in Router construction.
 
 ```bash
 cargo check --workspace
