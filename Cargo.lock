@@ -591,6 +591,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-secrets"
+version = "0.1.0"
+dependencies = [
+ "luminus-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "luminus-server"
 version = "0.1.0"
 dependencies = [

@@ -8,6 +8,7 @@ members = [
     "crates/luminus-router",
     "crates/luminus-storage",
     "crates/luminus-storage-sqlite",
+    "crates/luminus-secrets",
 ]
 
 [workspace.package]

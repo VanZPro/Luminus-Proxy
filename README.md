@@ -83,8 +83,9 @@ Rust migration phases:
 - R14: storage/persistence boundary and TypeScript database architecture audit.
 - R15: isolated SQLite account metadata adapter validated only against temporary Rust-owned test databases.
 - R16: read-only TypeScript account metadata compatibility adapter validated against synthetic fixtures.
+- R17: credential/encryption architecture audit and typed secret-resolution boundary.
 
-R15 uses an explicit database path and a separate SQLite adapter crate with a minimal Rust-native schema. R16 adds a separate read-only adapter for the TypeScript `accounts` metadata projection. The production TypeScript database was NOT opened and no production data was read. Credentials, token fields, quotas, and provider metadata are intentionally not selected; no migration or server wiring was added. The TypeScript/Bun backend remains production.
+R15 uses an explicit database path and a separate SQLite adapter crate with a minimal Rust-native schema. R16 adds a separate read-only adapter for the TypeScript `accounts` metadata projection. R17 adds only architecture foundations: source-only credential/encryption audit, redacted `SecretString`, and a typed synthetic resolver contract. No production credentials were read, no production database was opened, no decryption implementation or server credential loading was added, and the existing Blackbox environment configuration remains active. The TypeScript/Bun backend remains production.
 
 R14/R15 do not migrate the production database. The runtime `AccountPool` remains in-memory, secret persistence is deferred, and Blackbox is still the only real Rust provider.
 
