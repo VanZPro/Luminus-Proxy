@@ -10,4 +10,6 @@ pub enum StorageError {
     InvalidRecord,
     #[error("storage internal error")]
     Internal,
+    #[error("duplicate account identity")]
+    DuplicateAccount,
 }

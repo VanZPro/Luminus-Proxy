@@ -26,4 +26,4 @@ Hydration preserves repository order and reports only categorical, account-scope
 
 Tests use synthetic resolvers and temporary databases only. Production database rows, production credentials, environment keys, server startup, router semantics, and TypeScript runtime behavior are untouched. There is no OpenAI-compatible transport and no server cutover in R23.
 
-The current R23 tests verify classification-before-credential access, runtime provider rewriting, ordering, and disabled/unrelated account filtering. A real SQLite end-to-end and localhost Router test remain future hardening work; they are not enabled by production wiring.
+The current R23 tests verify classification-before-credential access, runtime provider rewriting, ordering, and disabled/unrelated account filtering. R24 consumes the resulting normal runtime `ProviderAccount` objects through the isolated runtime bootstrap; bootstrap details are documented in `docs/rust-runtime-bootstrap.md`. A real SQLite end-to-end and localhost Router test remain future hardening work; they are not enabled by production wiring.

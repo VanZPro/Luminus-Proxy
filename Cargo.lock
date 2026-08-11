@@ -661,6 +661,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "luminus-runtime-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "luminus-composition",
+ "luminus-core",
+ "luminus-legacy-composition",
+ "luminus-legacy-credentials",
+ "luminus-legacy-provider-config",
+ "luminus-protocols",
+ "luminus-provider-config",
+ "luminus-providers",
+ "luminus-router",
+ "luminus-secrets",
+ "luminus-storage",
+ "luminus-storage-sqlite",
+ "reqwest",
+ "rusqlite",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "luminus-secrets"
 version = "0.1.0"
 dependencies = [

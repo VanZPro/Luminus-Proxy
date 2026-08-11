@@ -6,7 +6,7 @@ use luminus_composition::{
 use luminus_core::model::{AccountId, ProviderId};
 use luminus_legacy_provider_config::{LegacyBlackboxConfig, LegacyByokConfig};
 use luminus_provider_config::{ProviderConfigError, ProviderConfigRequest, ProviderConfigResolver};
-use luminus_router::AccountPool;
+use luminus_router::{AccountPool, AccountPoolError};
 use luminus_secrets::{CredentialRequest, CredentialResolver, SecretError};
 use luminus_storage::{AccountRepository, StorageError};
 
@@ -60,8 +60,19 @@ impl LegacyByokBlackboxHydrator {
     }
 
     pub async fn hydrate(&self) -> Result<LegacyHydrationOutcomeSet, StorageError> {
+        let mut account_pool = AccountPool::new();
+        let report = self.hydrate_into(&mut account_pool).await?;
+        Ok(LegacyHydrationOutcomeSet {
+            account_pool,
+            report,
+        })
+    }
+
+    pub async fn hydrate_into(
+        &self,
+        pool: &mut AccountPool,
+    ) -> Result<LegacyHydrationReport, StorageError> {
         let records = self.repository.list_accounts().await?;
-        let mut pool = AccountPool::new();
         let mut report = LegacyHydrationReport::default();
         for record in records {
             if record.provider != ProviderId::from(BYOK_PROVIDER) || !record.enabled {
@@ -124,8 +135,9 @@ impl LegacyByokBlackboxHydrator {
             .map_err(|_| LegacyHydrationOutcome::ProviderConstructionFailed);
             match runtime {
                 Ok(account) => {
-                    pool.register(account)
-                        .map_err(|_| StorageError::InvalidRecord)?;
+                    pool.register(account).map_err(|error| match error {
+                        AccountPoolError::DuplicateAccount => StorageError::DuplicateAccount,
+                    })?;
                     report.entries.push(LegacyHydrationReportEntry {
                         account_id: record.id,
                         outcome: LegacyHydrationOutcome::HydratedBlackbox,
@@ -137,10 +149,7 @@ impl LegacyByokBlackboxHydrator {
                 }),
             }
         }
-        Ok(LegacyHydrationOutcomeSet {
-            account_pool: pool,
-            report,
-        })
+        Ok(report)
     }
 }
 

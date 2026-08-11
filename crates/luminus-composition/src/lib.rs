@@ -5,7 +5,7 @@ use luminus_core::model::{AccountId, ProviderId};
 use luminus_legacy_credentials::{LegacyCredentialError, LegacyPasswordReader};
 use luminus_provider_config::{ProviderConfigError, ProviderConfigRequest, ProviderConfigResolver};
 use luminus_providers::providers::blackbox::{BlackboxConfig, BlackboxProvider};
-use luminus_router::{AccountPool, ProviderAccount};
+use luminus_router::{AccountPool, AccountPoolError, ProviderAccount};
 use luminus_secrets::{
     CredentialRequest, CredentialResolver, CredentialResolverFuture, SecretError, SecretString,
 };
@@ -169,9 +169,20 @@ impl BlackboxAccountHydrator {
     }
 
     pub async fn hydrate(&self) -> Result<HydrationOutcome, StorageError> {
+        let mut account_pool = AccountPool::new();
+        let report = self.hydrate_into(&mut account_pool).await?;
+        Ok(HydrationOutcome {
+            account_pool,
+            report,
+        })
+    }
+
+    pub async fn hydrate_into(
+        &self,
+        pool: &mut AccountPool,
+    ) -> Result<HydrationReport, StorageError> {
         let records = self.repository.list_accounts().await?;
         let blackbox = ProviderId::from("blackbox");
-        let mut pool = AccountPool::new();
         let mut report = HydrationReport::default();
         for record in records {
             if record.provider != blackbox || !record.enabled {
@@ -241,13 +252,11 @@ impl BlackboxAccountHydrator {
                         continue;
                     }
                 };
-            pool.register(provider)
-                .map_err(|_| StorageError::InvalidRecord)?;
+            pool.register(provider).map_err(|error| match error {
+                AccountPoolError::DuplicateAccount => StorageError::DuplicateAccount,
+            })?;
         }
-        Ok(HydrationOutcome {
-            account_pool: pool,
-            report,
-        })
+        Ok(report)
     }
 }
 
@@ -259,6 +268,7 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
+        sync::{Mutex, OnceLock},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -274,9 +284,14 @@ mod tests {
     }
 
     fn fixture(rows: &[(i64, &str, &str)]) -> PathBuf {
+        static SERIAL: OnceLock<Mutex<u64>> = OnceLock::new();
+        let serial = SERIAL.get_or_init(|| Mutex::new(0));
+        let mut serial = serial.lock().unwrap();
+        *serial += 1;
         let path = std::env::temp_dir().join(format!(
-            "luminus-r19-{}-{}.db",
+            "luminus-r19-{}-{}-{}",
             std::process::id(),
+            *serial,
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
