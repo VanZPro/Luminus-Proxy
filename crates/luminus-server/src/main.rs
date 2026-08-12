@@ -1,12 +1,10 @@
-mod app;
-mod routes;
-
 use luminus_core::{
     AppConfig,
     model::{AccountDescriptor, AccountId, ProviderId},
 };
 use luminus_providers::{BlackboxConfig, BlackboxProvider};
 use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
+use luminus_server::{RuntimeStartupMode, app, build_experimental_snapshot};
 use std::sync::Arc;
 use tracing::info;
 
@@ -21,6 +19,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
     info!(service = "luminus", version = env!("CARGO_PKG_VERSION"), %address, environment = %config.environment, "server started");
+
+    if RuntimeStartupMode::parse(
+        std::env::var("LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP")
+            .ok()
+            .as_deref(),
+    )? == RuntimeStartupMode::ExperimentalBootstrap
+    {
+        let base_url = std::env::var("BLACKBOX_BASE_URL")?;
+        let api_key = std::env::var("BLACKBOX_API_KEY")?;
+        let snapshot = build_experimental_snapshot(base_url, api_key).await?;
+        axum::serve(listener, app::experimental_app(Arc::new(snapshot.router)))
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+        return Ok(());
+    }
 
     let provider = match (
         std::env::var("BLACKBOX_BASE_URL"),

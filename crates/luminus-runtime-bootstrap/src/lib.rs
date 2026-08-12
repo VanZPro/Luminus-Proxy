@@ -50,6 +50,13 @@ pub struct BlackboxRuntimeBootstrap {
 }
 
 impl BlackboxRuntimeBootstrap {
+    pub fn native_only(
+        native: BlackboxAccountHydrator,
+        registry: Arc<ProviderRegistry>,
+    ) -> NativeOnlyRuntimeBootstrap {
+        NativeOnlyRuntimeBootstrap { native, registry }
+    }
+
     pub fn new(
         native: BlackboxAccountHydrator,
         legacy: LegacyByokBlackboxHydrator,
@@ -104,6 +111,34 @@ impl BlackboxRuntimeBootstrap {
                 source_order: self.source_order,
                 native_blackbox,
                 legacy_blackbox,
+            },
+        })
+    }
+}
+
+pub struct NativeOnlyRuntimeBootstrap {
+    native: BlackboxAccountHydrator,
+    registry: Arc<ProviderRegistry>,
+}
+
+impl NativeOnlyRuntimeBootstrap {
+    pub async fn build(self) -> Result<RuntimeSnapshot, RuntimeBootstrapError> {
+        let mut pool = AccountPool::new();
+        let native_blackbox = self
+            .native
+            .hydrate_into(&mut pool)
+            .await
+            .map_err(RuntimeBootstrapError::from)?;
+        let account_pool = Arc::new(pool);
+        let router = Router::new(self.registry, Some(ProviderId::from("blackbox")))
+            .with_accounts(account_pool.clone());
+        Ok(RuntimeSnapshot {
+            account_pool,
+            router,
+            report: RuntimeBootstrapReport {
+                source_order: BlackboxSourceOrder::NativeThenLegacy,
+                native_blackbox,
+                legacy_blackbox: LegacyHydrationReport::default(),
             },
         })
     }
