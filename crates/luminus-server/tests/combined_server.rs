@@ -22,7 +22,7 @@ use luminus_runtime_bootstrap::BlackboxSourceOrder;
 use luminus_secrets::SecretString;
 use luminus_server::{
     app, build_experimental_snapshot, build_experimental_snapshot_with_legacy,
-    experimental_diagnostics, legacy::ExperimentalLegacySourceConfig,
+    experimental_diagnostics, legacy::ExperimentalLegacySourceConfig, prepare_current_runtime,
 };
 use rusqlite::{Connection, params};
 use tokio::net::TcpListener;
@@ -145,6 +145,161 @@ fn request() -> Request<Body> {
             r#"{"model":"bb/claude-sonnet-4.6","messages":[{"role":"User","content":"hello"}]}"#,
         ))
         .expect("build chat request")
+}
+
+async fn native_behavior_app(address: SocketAddr, key: &str) -> axum::Router {
+    let (_, router) = prepare_current_runtime(format!("http://{address}"), key.to_owned())
+        .expect("current native runtime prepares");
+    app::experimental_app(Arc::new(router))
+}
+
+async fn experimental_behavior_app(address: SocketAddr, key: &str) -> axum::Router {
+    let snapshot = build_experimental_snapshot(format!("http://{address}"), key.to_owned())
+        .await
+        .expect("experimental native runtime prepares");
+    app::experimental_app(Arc::new(snapshot.router))
+}
+
+async fn response_json(app: axum::Router) -> (StatusCode, serde_json::Value) {
+    let response = app.oneshot(request()).await.expect("request completes");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("response body reads");
+    (
+        status,
+        serde_json::from_slice(&body).expect("response is JSON"),
+    )
+}
+
+#[tokio::test]
+async fn native_current_and_experimental_success_behavior_is_equivalent() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let state = seen.clone();
+    let router = Router::new().route(
+        "/{*path}",
+        post(move |headers: HeaderMap| {
+            let state = state.clone();
+            async move {
+                state.lock().unwrap().push(
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok()) == Some("Bearer SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK"),
+                );
+                (StatusCode::OK, r#"{"id":"r30a","model":"bb/claude-sonnet-4.6","choices":[{"message":{"content":"parity-success"},"finish_reason":"stop"}]}"#)
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let current = native_behavior_app(address, "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK").await;
+    let experimental =
+        experimental_behavior_app(address, "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK").await;
+    let current_result = response_json(current).await;
+    let experimental_result = response_json(experimental).await;
+    assert_eq!(current_result.0, StatusCode::OK);
+    assert_eq!(experimental_result.0, StatusCode::OK);
+    assert_eq!(current_result.1, experimental_result.1);
+    assert_eq!(seen.lock().unwrap().as_slice(), &[true, true]);
+}
+
+#[tokio::test]
+async fn native_current_and_experimental_error_behavior_is_equivalent() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let state = seen.clone();
+    let router = Router::new().route(
+        "/{*path}",
+        post(move |headers: HeaderMap| {
+            let state = state.clone();
+            async move {
+                state.lock().unwrap().push(
+                    headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK"),
+                );
+                (StatusCode::TOO_MANY_REQUESTS, r#"{"error":"rate limited"}"#)
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let current = native_behavior_app(address, "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK").await;
+    let experimental =
+        experimental_behavior_app(address, "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK").await;
+    let current_result = response_json(current).await;
+    let experimental_result = response_json(experimental).await;
+    assert_eq!(current_result, experimental_result);
+    assert_eq!(current_result.0, StatusCode::BAD_GATEWAY);
+    assert_eq!(seen.lock().unwrap().as_slice(), &[true, true]);
+}
+
+#[tokio::test]
+async fn native_current_and_experimental_health_behavior_is_equivalent() {
+    let current = native_behavior_app(
+        "127.0.0.1:1".parse().unwrap(),
+        "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK",
+    )
+    .await;
+    let experimental = experimental_behavior_app(
+        "127.0.0.1:1".parse().unwrap(),
+        "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK",
+    )
+    .await;
+    let current_response = current
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let experimental_response = experimental
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(current_response.status(), experimental_response.status());
+    let current_body = axum::body::to_bytes(current_response.into_body(), 1024)
+        .await
+        .unwrap();
+    let experimental_body = axum::body::to_bytes(experimental_response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(current_body, experimental_body);
+}
+
+#[tokio::test]
+async fn readiness_is_intentionally_experimental_only() {
+    let current = native_behavior_app(
+        "127.0.0.1:1".parse().unwrap(),
+        "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK",
+    )
+    .await;
+    let snapshot = build_experimental_snapshot(
+        "http://127.0.0.1:1".into(),
+        "SYNTHETIC_R30A_API_KEY_DO_NOT_LEAK".into(),
+    )
+    .await
+    .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, false));
+    let experimental =
+        app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics);
+    let current_response = current
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let experimental_response = experimental
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(experimental_response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
