@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
 use luminus_composition::{BlackboxAccountHydrator, BlackboxCredentials, BlackboxProviderConfig};
+use luminus_core::model::{AccountDescriptor, AccountId, ProviderId};
 use luminus_legacy_composition::LegacyByokBlackboxHydrator;
 use luminus_legacy_credentials::LegacyPasswordReader;
 use luminus_legacy_provider_config::LegacyByokConfigResolver;
@@ -13,7 +14,8 @@ use luminus_provider_config::{
     ProviderConfigError, ProviderConfigRequest, ProviderConfigResolver,
     ProviderConfigResolverFuture,
 };
-use luminus_router::ProviderRegistry;
+use luminus_providers::{BlackboxConfig, BlackboxProvider};
+use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
 use luminus_runtime_bootstrap::{
     BlackboxRuntimeBootstrap, NativeOnlyRuntimeBootstrap, RuntimeSnapshot,
 };
@@ -87,7 +89,109 @@ pub struct ExperimentalRuntimeDiagnostics {
     pub configuration: ConfigurationDiagnostics,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct StartupParityReport {
+    pub equivalent: bool,
+    pub account_count_matches: bool,
+    pub account_identity_order_matches: bool,
+    pub provider_identity_order_matches: bool,
+    pub enabled_state_matches: bool,
+    pub routing_policy_matches: bool,
+    pub selection_policy_matches: bool,
+    pub fresh_health_state_matches: bool,
+}
+
+pub fn prepare_current_runtime(
+    base_url: String,
+    api_key: String,
+) -> Result<(Arc<AccountPool>, LuminusRouter), Box<dyn std::error::Error>> {
+    let provider = Arc::new(BlackboxProvider::new(BlackboxConfig::new(
+        base_url, api_key,
+    ))?);
+    let mut pool = AccountPool::new();
+    pool.register(ProviderAccount {
+        descriptor: AccountDescriptor {
+            id: AccountId::from("blackbox-default"),
+            provider: ProviderId::from("blackbox"),
+            enabled: true,
+        },
+        adapter: provider,
+    })?;
+    let accounts = Arc::new(pool);
+    let router = LuminusRouter::new(
+        Arc::new(ProviderRegistry::new()),
+        Some(ProviderId::from("blackbox")),
+    )
+    .with_accounts(accounts.clone());
+    Ok((accounts, router))
+}
+
+pub fn audit_native_startup_parity(
+    current_pool: &AccountPool,
+    current_router: &LuminusRouter,
+    experimental: &PreparedExperimentalRuntime,
+) -> StartupParityReport {
+    let provider = ProviderId::from("blackbox");
+    let current_ids = current_pool.ordered_ids_for_provider(&provider);
+    let experimental_ids = experimental
+        .snapshot
+        .account_pool
+        .ordered_ids_for_provider(&provider);
+    let current_enabled: Vec<bool> = current_ids
+        .iter()
+        .filter_map(|id| current_pool.get(id))
+        .map(|a| a.descriptor.enabled)
+        .collect();
+    let experimental_enabled: Vec<bool> = experimental_ids
+        .iter()
+        .filter_map(|id| experimental.snapshot.account_pool.get(id))
+        .map(|a| a.descriptor.enabled)
+        .collect();
+    let (current_max_attempts, current_fallback, current_selection, current_fresh) =
+        current_router.runtime_invariants();
+    let (
+        experimental_max_attempts,
+        experimental_fallback,
+        experimental_selection,
+        experimental_fresh,
+    ) = experimental.snapshot.router.runtime_invariants();
+    let account_count_matches = current_ids.len() == experimental_ids.len();
+    let account_identity_order_matches = current_ids == experimental_ids;
+    let provider_identity_order_matches = current_ids.iter().all(|id| {
+        current_pool
+            .get(id)
+            .is_some_and(|a| a.descriptor.provider == provider)
+    }) && experimental_ids.iter().all(|id| {
+        experimental
+            .snapshot
+            .account_pool
+            .get(id)
+            .is_some_and(|a| a.descriptor.provider == provider)
+    });
+    let enabled_state_matches = current_enabled == experimental_enabled;
+    let routing_policy_matches = current_max_attempts == experimental_max_attempts
+        && current_fallback == experimental_fallback;
+    let selection_policy_matches = current_selection == experimental_selection;
+    let fresh_health_state_matches = current_fresh && experimental_fresh;
+    let equivalent = account_count_matches
+        && account_identity_order_matches
+        && provider_identity_order_matches
+        && enabled_state_matches
+        && routing_policy_matches
+        && selection_policy_matches
+        && fresh_health_state_matches;
+    StartupParityReport {
+        equivalent,
+        account_count_matches,
+        account_identity_order_matches,
+        provider_identity_order_matches,
+        enabled_state_matches,
+        routing_policy_matches,
+        selection_policy_matches,
+        fresh_health_state_matches,
+    }
+}
+
 pub struct RuntimeConfigurationProvenance {
     pub native_metadata: ConfigurationOrigin,
     pub native_provider_config: ConfigurationOrigin,
@@ -576,6 +680,56 @@ mod tests {
             RuntimeStartupMode::ExperimentalBootstrap
         );
         assert!(config.legacy.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_startup_parity_is_safe_and_equivalent() {
+        let (current_pool, current_router) = prepare_current_runtime(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R30_API_KEY_DO_NOT_LEAK".into(),
+        )
+        .unwrap();
+        let experimental = prepare_experimental_runtime(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R30_API_KEY_DO_NOT_LEAK".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let report = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+        assert!(report.equivalent);
+        assert!(report.account_count_matches);
+        assert!(report.account_identity_order_matches);
+        assert!(report.provider_identity_order_matches);
+        assert!(report.enabled_state_matches);
+        assert!(report.routing_policy_matches);
+        assert!(report.selection_policy_matches);
+        assert!(report.fresh_health_state_matches);
+        let safe = format!("{report:?} {}", serde_json::to_string(&report).unwrap());
+        assert!(!safe.contains("SYNTHETIC_R30_API_KEY_DO_NOT_LEAK"));
+        assert!(!safe.contains("127.0.0.1:9"));
+        assert!(!safe.contains("blackbox-default"));
+    }
+
+    #[tokio::test]
+    async fn native_startup_parity_detects_account_mismatch() {
+        let (current_pool, current_router) = prepare_current_runtime(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R30_API_KEY_DO_NOT_LEAK".into(),
+        )
+        .unwrap();
+        let mut experimental = prepare_experimental_runtime(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R30_API_KEY_DO_NOT_LEAK".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        experimental.snapshot.account_pool = std::sync::Arc::new(AccountPool::new());
+        let report = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+        assert!(!report.equivalent);
+        assert!(!report.account_count_matches);
+        assert!(!report.account_identity_order_matches);
     }
 
     #[tokio::test]

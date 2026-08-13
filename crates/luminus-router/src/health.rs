@@ -36,6 +36,9 @@ impl AccountHealthStore {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn is_empty(&self) -> bool {
+        self.states.lock().unwrap().is_empty()
+    }
     pub fn state(&self, id: &AccountId) -> Option<AccountRuntimeState> {
         self.states.lock().unwrap().get(id).cloned()
     }

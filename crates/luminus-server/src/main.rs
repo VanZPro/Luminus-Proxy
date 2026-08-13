@@ -1,9 +1,5 @@
-use luminus_core::{
-    AppConfig,
-    model::{AccountDescriptor, AccountId, ProviderId},
-};
-use luminus_providers::{BlackboxConfig, BlackboxProvider};
-use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
+use luminus_core::AppConfig;
+use luminus_router::{AccountPool, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
     ExperimentalRuntimeExecutionOutcome, RuntimeConfigurationProvenance, RuntimeStartupMode, app,
     execute_prepared_experimental_runtime, parse_startup_config,
@@ -67,29 +63,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let address = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    let provider = match (
+    let (account_pool, router) = match (
         std::env::var("BLACKBOX_BASE_URL"),
         std::env::var("BLACKBOX_API_KEY"),
     ) {
-        (Ok(base_url), Ok(api_key)) => Some(Arc::new(BlackboxProvider::new(BlackboxConfig::new(
-            base_url, api_key,
-        ))?)),
-        _ => None,
+        (Ok(base_url), Ok(api_key)) => luminus_server::prepare_current_runtime(base_url, api_key)?,
+        _ => (
+            Arc::new(AccountPool::new()),
+            LuminusRouter::new(Arc::new(ProviderRegistry::new()), None),
+        ),
     };
-    let registry = ProviderRegistry::new();
-    let mut account_pool = AccountPool::new();
-    if let Some(provider) = provider {
-        account_pool.register(ProviderAccount {
-            descriptor: AccountDescriptor {
-                id: AccountId::from("blackbox-default"),
-                provider: ProviderId::from("blackbox"),
-                enabled: true,
-            },
-            adapter: provider,
-        })?;
-    }
-    let router = LuminusRouter::new(Arc::new(registry), Some(ProviderId("blackbox".into())))
-        .with_accounts(Arc::new(account_pool));
+    drop(account_pool);
     axum::serve(listener, app::experimental_app(Arc::new(router)))
         .with_graceful_shutdown(shutdown_signal())
         .await?;

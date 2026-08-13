@@ -122,6 +122,10 @@ impl Router {
         &self.health
     }
 
+    pub fn runtime_invariants(&self) -> (usize, bool, AccountSelectionStrategy, bool) {
+        (2, true, self.selector.strategy(), self.health.is_empty())
+    }
+
     pub fn resolve(&self, request: &CanonicalRequest) -> Result<RouteTarget, RouterError> {
         let provider_id = self
             .default_provider
