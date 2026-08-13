@@ -52,6 +52,12 @@ Dry-run constructs the real native/legacy `RuntimeSnapshot`, applies the existin
 
 Structural configuration, schema, duplicate-account, or requested-source failures return a non-zero error and never fall back to a native-only success. Per-account failures retain normal Serve-mode continuation semantics. With dry-run disabled, Serve mode, `/health`, `/experimental/ready`, the experimental chat route, and the default Current startup remain unchanged. The TypeScript/Bun backend remains production.
 
+## R31 opt-in native startup parity dry-run
+
+Set `LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP=true` and `LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN=true` to construct the real Current native runtime and the independent ExperimentalBootstrap native-only runtime, compare the existing safe `StartupParityReport`, emit its non-secret JSON, and exit without binding, serving HTTP, contacting Blackbox, opening SQLite, or enabling legacy compatibility. Accepted parity values are `true`, `on`, and `1`; absent, `false`, `off`, or `0` leave the existing startup behavior unchanged. Parity dry-run under Current mode, malformed values, simultaneous ordinary runtime dry-run, or explicit legacy activation fail safely before runtime dispatch. A non-equivalent report exits non-zero; no parity route or automatic boot audit is added.
+
+R31 reuses the R30 structural comparator and independently prepares both native runtimes. The report remains free of AccountIds, URLs, credentials, authorization values, and fingerprints.
+
 ## R29 safe runtime configuration provenance
 
 R29 extends the existing `ExperimentalRuntimeDiagnostics` model used by both `GET /experimental/ready` and R28 dry-run output. The added `configuration` summary reports only typed origin categories and high-level validation statuses; it never reports configuration values. Current categories are `environment`, `built-in`, `explicit-experimental`, `disabled`, and `not-applicable`.

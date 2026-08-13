@@ -357,6 +357,7 @@ impl RuntimeStartupMode {
 pub enum ExperimentalRuntimeExecution {
     Serve,
     DryRun,
+    ParityDryRun,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -388,10 +389,49 @@ pub fn parse_startup_config(
     source_order: Option<&str>,
     dry_run_value: Option<&str>,
 ) -> Result<ServerStartupConfig, Box<dyn std::error::Error>> {
+    parse_startup_config_with_parity(
+        runtime_value,
+        legacy_flag,
+        legacy_path,
+        legacy_key,
+        source_order,
+        dry_run_value,
+        None,
+    )
+}
+
+pub fn parse_startup_config_with_parity(
+    runtime_value: Option<&str>,
+    legacy_flag: Option<&str>,
+    legacy_path: Option<&str>,
+    legacy_key: Option<&str>,
+    source_order: Option<&str>,
+    dry_run_value: Option<&str>,
+    parity_dry_run_value: Option<&str>,
+) -> Result<ServerStartupConfig, Box<dyn std::error::Error>> {
     let runtime_mode = RuntimeStartupMode::parse(runtime_value)?;
-    let execution = ExperimentalRuntimeExecution::parse(dry_run_value)?;
-    if execution == ExperimentalRuntimeExecution::DryRun
-        && runtime_mode != RuntimeStartupMode::ExperimentalBootstrap
+    let ordinary_dry_run = ExperimentalRuntimeExecution::parse(dry_run_value)?;
+    let parity_dry_run = match parity_dry_run_value
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None | Some("false") | Some("off") | Some("0") => false,
+        Some("true") | Some("on") | Some("1") => true,
+        Some(_) => return Err("invalid LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN value".into()),
+    };
+    if parity_dry_run && ordinary_dry_run == ExperimentalRuntimeExecution::DryRun {
+        return Err("parity dry-run cannot be combined with runtime dry-run".into());
+    }
+    let execution = if parity_dry_run {
+        ExperimentalRuntimeExecution::ParityDryRun
+    } else {
+        ordinary_dry_run
+    };
+    if matches!(
+        execution,
+        ExperimentalRuntimeExecution::DryRun | ExperimentalRuntimeExecution::ParityDryRun
+    ) && runtime_mode != RuntimeStartupMode::ExperimentalBootstrap
     {
         return Err("dry-run requires experimental runtime bootstrap".into());
     }
@@ -402,6 +442,9 @@ pub fn parse_startup_config(
         legacy_key,
         source_order,
     )?;
+    if execution == ExperimentalRuntimeExecution::ParityDryRun && legacy.is_some() {
+        return Err("parity dry-run requires legacy compatibility to be disabled".into());
+    }
     Ok(ServerStartupConfig {
         runtime_mode,
         execution,
@@ -417,6 +460,7 @@ pub struct PreparedExperimentalRuntime {
 #[derive(Debug)]
 pub enum ExperimentalRuntimeExecutionOutcome {
     DryRun(ExperimentalRuntimeDiagnostics),
+    ParityDryRun(StartupParityReport),
     Serving {
         listener: tokio::net::TcpListener,
         app: axum::Router,
@@ -432,6 +476,9 @@ pub async fn execute_prepared_experimental_runtime(
         ExperimentalRuntimeExecution::DryRun => Ok(ExperimentalRuntimeExecutionOutcome::DryRun(
             prepared.diagnostics,
         )),
+        ExperimentalRuntimeExecution::ParityDryRun => {
+            Err("parity dry-run must be executed through the top-level startup path".into())
+        }
         ExperimentalRuntimeExecution::Serve => {
             let listener = tokio::net::TcpListener::bind(address).await?;
             let app = app::experimental_app_with_diagnostics(
@@ -617,6 +664,64 @@ mod tests {
         );
         assert!(ExperimentalRuntimeExecution::parse(Some("maybe")).is_err());
         assert!(parse_startup_config(None, None, None, None, None, Some("true")).is_err());
+    }
+
+    #[test]
+    fn parity_dry_run_requires_experimental_native_only_startup() {
+        for value in ["true", "on", "1"] {
+            let config = parse_startup_config_with_parity(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(value),
+            )
+            .expect("parity dry-run should parse");
+            assert_eq!(config.execution, ExperimentalRuntimeExecution::ParityDryRun);
+            assert!(config.legacy.is_none());
+        }
+        assert!(
+            parse_startup_config_with_parity(None, None, None, None, None, None, Some("true"))
+                .is_err()
+        );
+        assert!(
+            parse_startup_config_with_parity(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                Some("true"),
+                Some("true")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_startup_config_with_parity(
+                Some("true"),
+                Some("true"),
+                Some("db"),
+                Some("key"),
+                Some("legacy-then-native"),
+                None,
+                Some("true")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_startup_config_with_parity(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("maybe")
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@ use luminus_core::AppConfig;
 use luminus_router::{AccountPool, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
     ExperimentalRuntimeExecutionOutcome, RuntimeConfigurationProvenance, RuntimeStartupMode, app,
-    execute_prepared_experimental_runtime, parse_startup_config,
-    prepare_experimental_runtime_with_provenance,
+    audit_native_startup_parity, execute_prepared_experimental_runtime,
+    parse_startup_config_with_parity, prepare_experimental_runtime_with_provenance,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(&config.log)
         .with_target(false)
         .init();
-    let startup = parse_startup_config(
+    let startup = parse_startup_config_with_parity(
         std::env::var("LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP")
             .ok()
             .as_deref(),
@@ -34,9 +34,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("LUMINUS_EXPERIMENTAL_RUNTIME_DRY_RUN")
             .ok()
             .as_deref(),
+        std::env::var("LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN")
+            .ok()
+            .as_deref(),
     )?;
 
     if startup.runtime_mode == RuntimeStartupMode::ExperimentalBootstrap {
+        if startup.execution == luminus_server::ExperimentalRuntimeExecution::ParityDryRun {
+            let base_url = std::env::var("BLACKBOX_BASE_URL")?;
+            let api_key = std::env::var("BLACKBOX_API_KEY")?;
+            let (current_pool, current_router) =
+                luminus_server::prepare_current_runtime(base_url.clone(), api_key.clone())?;
+            let experimental = prepare_experimental_runtime_with_provenance(
+                base_url,
+                api_key,
+                None,
+                RuntimeConfigurationProvenance::environment_native(),
+            )
+            .await?;
+            let report = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+            println!("{}", serde_json::to_string(&report)?);
+            if !report.equivalent {
+                return Err("native startup parity mismatch".into());
+            }
+            return Ok(());
+        }
         let base_url = std::env::var("BLACKBOX_BASE_URL")?;
         let api_key = std::env::var("BLACKBOX_API_KEY")?;
         let prepared = prepare_experimental_runtime_with_provenance(
@@ -50,6 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match execute_prepared_experimental_runtime(prepared, startup.execution, &address).await? {
             ExperimentalRuntimeExecutionOutcome::DryRun(diagnostics) => {
                 println!("{}", serde_json::to_string(&diagnostics)?);
+            }
+            ExperimentalRuntimeExecutionOutcome::ParityDryRun(report) => {
+                println!("{}", serde_json::to_string(&report)?);
             }
             ExperimentalRuntimeExecutionOutcome::Serving { listener, app } => {
                 info!(service = "luminus", version = env!("CARGO_PKG_VERSION"), %address, environment = %config.environment, "server started");
