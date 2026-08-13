@@ -446,6 +446,7 @@ pub enum ExperimentalRuntimeExecution {
     Serve,
     DryRun,
     ParityDryRun,
+    MigrationReadinessDryRun,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -497,8 +498,42 @@ pub fn parse_startup_config_with_parity(
     dry_run_value: Option<&str>,
     parity_dry_run_value: Option<&str>,
 ) -> Result<ServerStartupConfig, Box<dyn std::error::Error>> {
+    parse_startup_config_with_readiness(
+        runtime_value,
+        legacy_flag,
+        legacy_path,
+        legacy_key,
+        source_order,
+        dry_run_value,
+        parity_dry_run_value,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn parse_startup_config_with_readiness(
+    runtime_value: Option<&str>,
+    legacy_flag: Option<&str>,
+    legacy_path: Option<&str>,
+    legacy_key: Option<&str>,
+    source_order: Option<&str>,
+    dry_run_value: Option<&str>,
+    parity_dry_run_value: Option<&str>,
+    readiness_dry_run_value: Option<&str>,
+) -> Result<ServerStartupConfig, Box<dyn std::error::Error>> {
     let runtime_mode = RuntimeStartupMode::parse(runtime_value)?;
     let ordinary_dry_run = ExperimentalRuntimeExecution::parse(dry_run_value)?;
+    let readiness_dry_run = match readiness_dry_run_value
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None | Some("false") | Some("off") | Some("0") => false,
+        Some("true") | Some("on") | Some("1") => true,
+        Some(_) => {
+            return Err("invalid LUMINUS_EXPERIMENTAL_MIGRATION_READINESS_DRY_RUN value".into());
+        }
+    };
     let parity_dry_run = match parity_dry_run_value
         .map(str::trim)
         .map(str::to_ascii_lowercase)
@@ -508,28 +543,43 @@ pub fn parse_startup_config_with_parity(
         Some("true") | Some("on") | Some("1") => true,
         Some(_) => return Err("invalid LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN value".into()),
     };
-    if parity_dry_run && ordinary_dry_run == ExperimentalRuntimeExecution::DryRun {
-        return Err("parity dry-run cannot be combined with runtime dry-run".into());
+    if (parity_dry_run || readiness_dry_run)
+        && ordinary_dry_run == ExperimentalRuntimeExecution::DryRun
+        || (readiness_dry_run && parity_dry_run)
+    {
+        return Err("offline dry-run modes are mutually exclusive".into());
     }
-    let execution = if parity_dry_run {
+    let execution = if readiness_dry_run {
+        ExperimentalRuntimeExecution::MigrationReadinessDryRun
+    } else if parity_dry_run {
         ExperimentalRuntimeExecution::ParityDryRun
     } else {
         ordinary_dry_run
     };
     if matches!(
         execution,
-        ExperimentalRuntimeExecution::DryRun | ExperimentalRuntimeExecution::ParityDryRun
+        ExperimentalRuntimeExecution::DryRun
+            | ExperimentalRuntimeExecution::ParityDryRun
+            | ExperimentalRuntimeExecution::MigrationReadinessDryRun
     ) && runtime_mode != RuntimeStartupMode::ExperimentalBootstrap
     {
         return Err("dry-run requires experimental runtime bootstrap".into());
     }
-    if execution == ExperimentalRuntimeExecution::ParityDryRun
-        && (legacy_flag.is_some()
-            || legacy_path.is_some()
-            || legacy_key.is_some()
-            || source_order.is_some())
+    if matches!(
+        execution,
+        ExperimentalRuntimeExecution::ParityDryRun
+            | ExperimentalRuntimeExecution::MigrationReadinessDryRun
+    ) && (legacy_flag.is_some()
+        || legacy_path.is_some()
+        || legacy_key.is_some()
+        || source_order.is_some())
     {
-        return Err("parity dry-run requires legacy compatibility to be disabled".into());
+        return Err(if execution == ExperimentalRuntimeExecution::ParityDryRun {
+            "parity dry-run requires legacy compatibility to be disabled"
+        } else {
+            "migration-readiness dry-run requires legacy compatibility to be disabled"
+        }
+        .into());
     }
     let legacy = legacy::parse_config(
         runtime_mode,
@@ -538,8 +588,18 @@ pub fn parse_startup_config_with_parity(
         legacy_key,
         source_order,
     )?;
-    if execution == ExperimentalRuntimeExecution::ParityDryRun && legacy.is_some() {
-        return Err("parity dry-run requires legacy compatibility to be disabled".into());
+    if matches!(
+        execution,
+        ExperimentalRuntimeExecution::ParityDryRun
+            | ExperimentalRuntimeExecution::MigrationReadinessDryRun
+    ) && legacy.is_some()
+    {
+        return Err(if execution == ExperimentalRuntimeExecution::ParityDryRun {
+            "parity dry-run requires legacy compatibility to be disabled"
+        } else {
+            "migration-readiness dry-run requires legacy compatibility to be disabled"
+        }
+        .into());
     }
     Ok(ServerStartupConfig {
         runtime_mode,
@@ -565,16 +625,47 @@ pub async fn execute_native_startup_parity_dry_run(
     base_url: String,
     api_key: String,
 ) -> Result<StartupParityReport, NativeStartupParityError> {
-    let (current_pool, current_router) = prepare_current_runtime(base_url.clone(), api_key.clone())
-        .map_err(NativeStartupParityError::Preparation)?;
-    let experimental = prepare_experimental_runtime(base_url, api_key, None)
+    let (_, report) = build_native_startup_evidence(base_url, api_key)
         .await
         .map_err(NativeStartupParityError::Preparation)?;
-    let report = audit_native_startup_parity(&current_pool, &current_router, &experimental);
     if report.equivalent {
         Ok(report)
     } else {
         Err(NativeStartupParityError::Mismatch(report))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NativeMigrationReadinessError {
+    #[error("native migration readiness is not satisfied")]
+    NoGo(NativeMigrationReadinessReport),
+    #[error(transparent)]
+    Preparation(#[from] Box<dyn std::error::Error>),
+}
+
+async fn build_native_startup_evidence(
+    base_url: String,
+    api_key: String,
+) -> Result<(ExperimentalRuntimeDiagnostics, StartupParityReport), Box<dyn std::error::Error>> {
+    let (current_pool, current_router) =
+        prepare_current_runtime(base_url.clone(), api_key.clone())?;
+    let experimental = prepare_experimental_runtime(base_url, api_key, None).await?;
+    let parity = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+    Ok((experimental.diagnostics, parity))
+}
+
+pub async fn execute_native_migration_readiness_dry_run(
+    base_url: String,
+    api_key: String,
+) -> Result<NativeMigrationReadinessReport, NativeMigrationReadinessError> {
+    let (diagnostics, parity) = build_native_startup_evidence(base_url, api_key)
+        .await
+        .map_err(NativeMigrationReadinessError::Preparation)?;
+    let report = assess_native_migration_readiness(&diagnostics, &parity);
+    if report.decision == MigrationReadinessDecision::Go {
+        Ok(report)
+    } else {
+        Err(NativeMigrationReadinessError::NoGo(report))
     }
 }
 
@@ -596,9 +687,11 @@ pub async fn execute_prepared_experimental_runtime(
         ExperimentalRuntimeExecution::DryRun => Ok(ExperimentalRuntimeExecutionOutcome::DryRun(
             prepared.diagnostics,
         )),
-        ExperimentalRuntimeExecution::ParityDryRun => {
-            Err("parity dry-run must be executed through the top-level startup path".into())
-        }
+        ExperimentalRuntimeExecution::ParityDryRun
+        | ExperimentalRuntimeExecution::MigrationReadinessDryRun => Err(
+            "offline parity/readiness dry-run must be executed through the top-level startup path"
+                .into(),
+        ),
         ExperimentalRuntimeExecution::Serve => {
             let listener = tokio::net::TcpListener::bind(address).await?;
             let app = app::experimental_app_with_diagnostics(
@@ -983,6 +1076,106 @@ mod tests {
                 None,
                 None,
                 Some("maybe")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migration_readiness_flag_matrix_and_conflicts_are_strict() {
+        for value in [None, Some("false"), Some("off"), Some("0")] {
+            let config = parse_startup_config_with_readiness(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                value,
+            )
+            .expect("disabled readiness flag should preserve serve mode");
+            assert_eq!(config.execution, ExperimentalRuntimeExecution::Serve);
+        }
+        for value in ["true", "on", "1"] {
+            let config = parse_startup_config_with_readiness(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(value),
+            )
+            .expect("enabled readiness flag should parse");
+            assert_eq!(
+                config.execution,
+                ExperimentalRuntimeExecution::MigrationReadinessDryRun
+            );
+        }
+        assert!(
+            parse_startup_config_with_readiness(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("maybe")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_startup_config_with_readiness(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("true")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_startup_config_with_readiness(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                Some("true"),
+                None,
+                Some("true")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_startup_config_with_readiness(
+                Some("true"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("true"),
+                Some("true")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_startup_config_with_readiness(
+                Some("true"),
+                Some("true"),
+                Some("nonexistent.db"),
+                Some("key"),
+                Some("native"),
+                None,
+                None,
+                Some("true")
             )
             .is_err()
         );

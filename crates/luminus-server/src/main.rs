@@ -2,8 +2,9 @@ use luminus_core::AppConfig;
 use luminus_router::{AccountPool, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
     ExperimentalRuntimeExecutionOutcome, RuntimeConfigurationProvenance, RuntimeStartupMode, app,
-    execute_native_startup_parity_dry_run, execute_prepared_experimental_runtime,
-    parse_startup_config_with_parity, prepare_experimental_runtime_with_provenance,
+    execute_native_migration_readiness_dry_run, execute_native_startup_parity_dry_run,
+    execute_prepared_experimental_runtime, parse_startup_config_with_readiness,
+    prepare_experimental_runtime_with_provenance,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -15,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(&config.log)
         .with_target(false)
         .init();
-    let startup = parse_startup_config_with_parity(
+    let startup = parse_startup_config_with_readiness(
         std::env::var("LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP")
             .ok()
             .as_deref(),
@@ -37,6 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN")
             .ok()
             .as_deref(),
+        std::env::var("LUMINUS_EXPERIMENTAL_MIGRATION_READINESS_DRY_RUN")
+            .ok()
+            .as_deref(),
     )?;
 
     if startup.runtime_mode == RuntimeStartupMode::ExperimentalBootstrap {
@@ -45,6 +49,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let api_key = std::env::var("BLACKBOX_API_KEY")?;
             let report = execute_native_startup_parity_dry_run(base_url, api_key).await?;
             println!("{}", serde_json::to_string(&report)?);
+            return Ok(());
+        }
+        if startup.execution
+            == luminus_server::ExperimentalRuntimeExecution::MigrationReadinessDryRun
+        {
+            let base_url = std::env::var("BLACKBOX_BASE_URL")?;
+            let api_key = std::env::var("BLACKBOX_API_KEY")?;
+            match execute_native_migration_readiness_dry_run(base_url, api_key).await {
+                Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                Err(luminus_server::NativeMigrationReadinessError::NoGo(report)) => {
+                    println!("{}", serde_json::to_string(&report)?);
+                    return Err("native migration readiness is not satisfied".into());
+                }
+                Err(luminus_server::NativeMigrationReadinessError::Preparation(error)) => {
+                    return Err(error);
+                }
+            }
             return Ok(());
         }
         let base_url = std::env::var("BLACKBOX_BASE_URL")?;

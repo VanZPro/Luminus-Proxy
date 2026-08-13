@@ -187,6 +187,58 @@ async fn native_parity_process_exits_without_upstream_http_or_bind() {
     assert!(occupied.local_addr().is_ok());
 }
 
+#[tokio::test]
+async fn native_migration_readiness_process_exits_without_upstream_http_or_bind() {
+    let upstream_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = upstream_count.clone();
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = upstream_listener.accept().await {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port().to_string();
+    let binary = env::var("CARGO_BIN_EXE_luminus-server").unwrap();
+    let mut child = Command::new(binary)
+        .env("LUMINUS_HOST", "127.0.0.1")
+        .env("LUMINUS_PORT", &occupied_port)
+        .env("LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP", "true")
+        .env("LUMINUS_EXPERIMENTAL_MIGRATION_READINESS_DRY_RUN", "true")
+        .env_remove("LUMINUS_EXPERIMENTAL_RUNTIME_DRY_RUN")
+        .env_remove("LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN")
+        .env_remove("LUMINUS_EXPERIMENTAL_LEGACY_SOURCE")
+        .env_remove("LUMINUS_EXPERIMENTAL_LEGACY_DB_PATH")
+        .env_remove("LUMINUS_EXPERIMENTAL_LEGACY_KEY")
+        .env_remove("LUMINUS_EXPERIMENTAL_SOURCE_ORDER")
+        .env("BLACKBOX_BASE_URL", format!("http://{upstream_address}"))
+        .env("BLACKBOX_API_KEY", "SYNTHETIC_R33_API_KEY_DO_NOT_LEAK")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("migration readiness dry-run did not terminate");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"decision\":\"go\""));
+    assert!(!stdout.contains("SYNTHETIC_R33_API_KEY_DO_NOT_LEAK"));
+    assert_eq!(upstream_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(occupied.local_addr().is_ok());
+}
+
 #[test]
 fn parity_legacy_conflict_rejects_before_filesystem_io() {
     let path = env::temp_dir().join(format!(
