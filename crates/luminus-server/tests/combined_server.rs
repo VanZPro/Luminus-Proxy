@@ -1,7 +1,8 @@
 use std::{
-    fs,
+    env, fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -22,7 +23,8 @@ use luminus_runtime_bootstrap::BlackboxSourceOrder;
 use luminus_secrets::SecretString;
 use luminus_server::{
     app, build_experimental_snapshot, build_experimental_snapshot_with_legacy,
-    experimental_diagnostics, legacy::ExperimentalLegacySourceConfig, prepare_current_runtime,
+    experimental_diagnostics, legacy::ExperimentalLegacySourceConfig,
+    parse_startup_config_with_parity, prepare_current_runtime,
 };
 use rusqlite::{Connection, params};
 use tokio::net::TcpListener;
@@ -128,6 +130,83 @@ async fn upstream(
             .expect("serve synthetic upstream")
     });
     address
+}
+
+#[tokio::test]
+async fn native_parity_process_exits_without_upstream_http_or_bind() {
+    let upstream_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = upstream_count.clone();
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = upstream_listener.accept().await else {
+                break;
+            };
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(socket);
+        }
+    });
+
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port().to_string();
+    assert_eq!(upstream_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let binary = env::var("CARGO_BIN_EXE_luminus-server")
+        .expect("Cargo must expose the luminus-server binary to integration tests");
+    let mut child = Command::new(binary)
+        .env("LUMINUS_HOST", "127.0.0.1")
+        .env("LUMINUS_PORT", &occupied_port)
+        .env("LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP", "true")
+        .env("LUMINUS_EXPERIMENTAL_PARITY_DRY_RUN", "true")
+        .env_remove("LUMINUS_EXPERIMENTAL_RUNTIME_DRY_RUN")
+        .env_remove("LUMINUS_EXPERIMENTAL_LEGACY_SOURCE")
+        .env_remove("LUMINUS_EXPERIMENTAL_LEGACY_DB_PATH")
+        .env_remove("LUMINUS_EXPERIMENTAL_LEGACY_KEY")
+        .env_remove("LUMINUS_EXPERIMENTAL_SOURCE_ORDER")
+        .env("BLACKBOX_BASE_URL", format!("http://{upstream_address}"))
+        .env("BLACKBOX_API_KEY", "SYNTHETIC_R31D_API_KEY_DO_NOT_LEAK")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn luminus-server binary");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "parity process exited unsuccessfully");
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("parity dry-run did not terminate");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(upstream_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(occupied.local_addr().is_ok());
+}
+
+#[test]
+fn parity_legacy_conflict_rejects_before_filesystem_io() {
+    let path = env::temp_dir().join(format!(
+        "luminus-r31d-nonexistent-{}.db",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&path);
+    assert!(!path.exists());
+    let error = parse_startup_config_with_parity(
+        Some("true"),
+        Some("true"),
+        Some(path.to_str().unwrap()),
+        Some("SYNTHETIC_R31D_LEGACY_KEY_DO_NOT_LEAK"),
+        Some("legacy-then-native"),
+        None,
+        Some("true"),
+    )
+    .expect_err("parity and legacy must conflict before I/O");
+    assert!(error.to_string().contains("parity dry-run"));
+    assert!(!path.exists());
 }
 
 fn legacy_config(path: &Path, order: BlackboxSourceOrder) -> ExperimentalLegacySourceConfig {
