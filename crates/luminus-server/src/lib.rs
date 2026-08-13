@@ -101,6 +101,94 @@ pub struct StartupParityReport {
     pub fresh_health_state_matches: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum MigrationReadinessDecision {
+    #[serde(rename = "go")]
+    Go,
+    #[serde(rename = "no-go")]
+    NoGo,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum NativeMigrationReadinessReason {
+    #[serde(rename = "experimental-snapshot-not-ready")]
+    ExperimentalSnapshotNotReady,
+    #[serde(rename = "native-parity-mismatch")]
+    NativeParityMismatch,
+    #[serde(rename = "startup-validation-not-passed")]
+    StartupValidationNotPassed,
+    #[serde(rename = "native-validation-not-passed")]
+    NativeValidationNotPassed,
+    #[serde(rename = "runtime-snapshot-validation-not-passed")]
+    RuntimeSnapshotValidationNotPassed,
+    #[serde(rename = "legacy-outside-native-scope")]
+    LegacyOutsideNativeScope,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NativeMigrationReadinessReport {
+    pub decision: MigrationReadinessDecision,
+    pub experimental_snapshot_ready: bool,
+    pub native_startup_parity: bool,
+    pub startup_configuration_validated: bool,
+    pub native_configuration_validated: bool,
+    pub runtime_snapshot_validated: bool,
+    pub native_scope_valid: bool,
+    pub reasons: Vec<NativeMigrationReadinessReason>,
+}
+
+pub fn assess_native_migration_readiness(
+    diagnostics: &ExperimentalRuntimeDiagnostics,
+    parity: &StartupParityReport,
+) -> NativeMigrationReadinessReport {
+    let experimental_snapshot_ready =
+        diagnostics.ready && diagnostics.runtime_mode == "experimental-bootstrap";
+    let startup_configuration_validated =
+        diagnostics.configuration.startup_config == ValidationStatus::Passed;
+    let native_configuration_validated =
+        diagnostics.configuration.native.validation == ValidationStatus::Passed;
+    let runtime_snapshot_validated =
+        diagnostics.configuration.runtime_snapshot == ValidationStatus::Passed;
+    let native_scope_valid = !diagnostics.legacy_enabled
+        && diagnostics.configuration.legacy.validation == ValidationStatus::NotApplicable
+        && diagnostics.configuration.legacy_preflight == ValidationStatus::NotApplicable;
+
+    let mut reasons = Vec::new();
+    if !experimental_snapshot_ready {
+        reasons.push(NativeMigrationReadinessReason::ExperimentalSnapshotNotReady);
+    }
+    if !parity.equivalent {
+        reasons.push(NativeMigrationReadinessReason::NativeParityMismatch);
+    }
+    if !startup_configuration_validated {
+        reasons.push(NativeMigrationReadinessReason::StartupValidationNotPassed);
+    }
+    if !native_configuration_validated {
+        reasons.push(NativeMigrationReadinessReason::NativeValidationNotPassed);
+    }
+    if !runtime_snapshot_validated {
+        reasons.push(NativeMigrationReadinessReason::RuntimeSnapshotValidationNotPassed);
+    }
+    if !native_scope_valid {
+        reasons.push(NativeMigrationReadinessReason::LegacyOutsideNativeScope);
+    }
+
+    NativeMigrationReadinessReport {
+        decision: if reasons.is_empty() {
+            MigrationReadinessDecision::Go
+        } else {
+            MigrationReadinessDecision::NoGo
+        },
+        experimental_snapshot_ready,
+        native_startup_parity: parity.equivalent,
+        startup_configuration_validated,
+        native_configuration_validated,
+        runtime_snapshot_validated,
+        native_scope_valid,
+        reasons,
+    }
+}
+
 pub fn prepare_current_runtime(
     base_url: String,
     api_key: String,
@@ -652,6 +740,150 @@ mod tests {
     use luminus_core::model::AccountId;
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
+
+    fn matching_parity_report() -> StartupParityReport {
+        StartupParityReport {
+            equivalent: true,
+            account_count_matches: true,
+            account_identity_order_matches: true,
+            provider_identity_order_matches: true,
+            enabled_state_matches: true,
+            routing_policy_matches: true,
+            selection_policy_matches: true,
+            fresh_health_state_matches: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_migration_readiness_real_evidence_is_go_and_offline() {
+        let (current_pool, current_router) = prepare_current_runtime(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R32_API_KEY_DO_NOT_LEAK".into(),
+        )
+        .unwrap();
+        let experimental = prepare_experimental_runtime(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R32_API_KEY_DO_NOT_LEAK".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let parity = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+        let report = assess_native_migration_readiness(&experimental.diagnostics, &parity);
+        assert_eq!(report.decision, MigrationReadinessDecision::Go);
+        assert!(report.reasons.is_empty());
+        assert_eq!(
+            report,
+            assess_native_migration_readiness(&experimental.diagnostics, &parity)
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        for forbidden in [
+            "SYNTHETIC_R32_API_KEY_DO_NOT_LEAK",
+            "127.0.0.1:9",
+            "blackbox-default",
+            "Authorization",
+        ] {
+            assert!(!json.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn native_migration_readiness_collects_safe_no_go_reasons_deterministically() {
+        let mut diagnostics = ExperimentalRuntimeDiagnostics {
+            ready: true,
+            runtime_mode: "experimental-bootstrap",
+            runtime_accounts: 1,
+            native_hydrated: 1,
+            native_failed: 0,
+            legacy_enabled: false,
+            legacy_preflight: "not-applicable",
+            legacy_hydrated: 0,
+            legacy_failed: 0,
+            legacy_skipped: 0,
+            source_order: None,
+            configuration: ConfigurationDiagnostics {
+                startup_config: ValidationStatus::Passed,
+                native: NativeConfigurationDiagnostics {
+                    metadata_origin: ConfigurationOrigin::Environment,
+                    provider_config_origin: ConfigurationOrigin::Environment,
+                    credential_origin: ConfigurationOrigin::Environment,
+                    validation: ValidationStatus::Passed,
+                },
+                legacy: LegacyConfigurationDiagnostics {
+                    activation_origin: ConfigurationOrigin::NotApplicable,
+                    database_origin: ConfigurationOrigin::NotApplicable,
+                    credential_key_origin: ConfigurationOrigin::NotApplicable,
+                    source_order_origin: ConfigurationOrigin::NotApplicable,
+                    validation: ValidationStatus::NotApplicable,
+                },
+                legacy_preflight: ValidationStatus::NotApplicable,
+                runtime_snapshot: ValidationStatus::Passed,
+            },
+        };
+        let parity = matching_parity_report();
+        diagnostics.ready = false;
+        diagnostics.configuration.startup_config = ValidationStatus::NotApplicable;
+        diagnostics.configuration.native.validation = ValidationStatus::NotApplicable;
+        diagnostics.configuration.runtime_snapshot = ValidationStatus::NotApplicable;
+        diagnostics.legacy_enabled = true;
+        diagnostics.configuration.legacy.validation = ValidationStatus::Passed;
+        diagnostics.configuration.legacy_preflight = ValidationStatus::Passed;
+        let report = assess_native_migration_readiness(&diagnostics, &parity);
+        assert_eq!(report.decision, MigrationReadinessDecision::NoGo);
+        assert_eq!(
+            report.reasons,
+            vec![
+                NativeMigrationReadinessReason::ExperimentalSnapshotNotReady,
+                NativeMigrationReadinessReason::StartupValidationNotPassed,
+                NativeMigrationReadinessReason::NativeValidationNotPassed,
+                NativeMigrationReadinessReason::RuntimeSnapshotValidationNotPassed,
+                NativeMigrationReadinessReason::LegacyOutsideNativeScope,
+            ]
+        );
+    }
+
+    #[test]
+    fn native_migration_readiness_parity_mismatch_is_no_go() {
+        let diagnostics = ExperimentalRuntimeDiagnostics {
+            ready: true,
+            runtime_mode: "experimental-bootstrap",
+            runtime_accounts: 1,
+            native_hydrated: 1,
+            native_failed: 0,
+            legacy_enabled: false,
+            legacy_preflight: "not-applicable",
+            legacy_hydrated: 0,
+            legacy_failed: 0,
+            legacy_skipped: 0,
+            source_order: None,
+            configuration: ConfigurationDiagnostics {
+                startup_config: ValidationStatus::Passed,
+                native: NativeConfigurationDiagnostics {
+                    metadata_origin: ConfigurationOrigin::Environment,
+                    provider_config_origin: ConfigurationOrigin::Environment,
+                    credential_origin: ConfigurationOrigin::Environment,
+                    validation: ValidationStatus::Passed,
+                },
+                legacy: LegacyConfigurationDiagnostics {
+                    activation_origin: ConfigurationOrigin::NotApplicable,
+                    database_origin: ConfigurationOrigin::NotApplicable,
+                    credential_key_origin: ConfigurationOrigin::NotApplicable,
+                    source_order_origin: ConfigurationOrigin::NotApplicable,
+                    validation: ValidationStatus::NotApplicable,
+                },
+                legacy_preflight: ValidationStatus::NotApplicable,
+                runtime_snapshot: ValidationStatus::Passed,
+            },
+        };
+        let mut parity = matching_parity_report();
+        parity.equivalent = false;
+        let report = assess_native_migration_readiness(&diagnostics, &parity);
+        assert_eq!(report.decision, MigrationReadinessDecision::NoGo);
+        assert_eq!(
+            report.reasons,
+            vec![NativeMigrationReadinessReason::NativeParityMismatch]
+        );
+    }
 
     #[test]
     fn startup_mode_defaults_current() {
