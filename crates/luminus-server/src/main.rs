@@ -2,7 +2,7 @@ use luminus_core::AppConfig;
 use luminus_router::{AccountPool, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
     ExperimentalRuntimeExecutionOutcome, RuntimeConfigurationProvenance, RuntimeStartupMode, app,
-    audit_native_startup_parity, execute_prepared_experimental_runtime,
+    execute_native_startup_parity_dry_run, execute_prepared_experimental_runtime,
     parse_startup_config_with_parity, prepare_experimental_runtime_with_provenance,
 };
 use std::sync::Arc;
@@ -43,20 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if startup.execution == luminus_server::ExperimentalRuntimeExecution::ParityDryRun {
             let base_url = std::env::var("BLACKBOX_BASE_URL")?;
             let api_key = std::env::var("BLACKBOX_API_KEY")?;
-            let (current_pool, current_router) =
-                luminus_server::prepare_current_runtime(base_url.clone(), api_key.clone())?;
-            let experimental = prepare_experimental_runtime_with_provenance(
-                base_url,
-                api_key,
-                None,
-                RuntimeConfigurationProvenance::environment_native(),
-            )
-            .await?;
-            let report = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+            let report = execute_native_startup_parity_dry_run(base_url, api_key).await?;
             println!("{}", serde_json::to_string(&report)?);
-            if !report.equivalent {
-                return Err("native startup parity mismatch".into());
-            }
             return Ok(());
         }
         let base_url = std::env::var("BLACKBOX_BASE_URL")?;
@@ -72,9 +60,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match execute_prepared_experimental_runtime(prepared, startup.execution, &address).await? {
             ExperimentalRuntimeExecutionOutcome::DryRun(diagnostics) => {
                 println!("{}", serde_json::to_string(&diagnostics)?);
-            }
-            ExperimentalRuntimeExecutionOutcome::ParityDryRun(report) => {
-                println!("{}", serde_json::to_string(&report)?);
             }
             ExperimentalRuntimeExecutionOutcome::Serving { listener, app } => {
                 info!(service = "luminus", version = env!("CARGO_PKG_VERSION"), %address, environment = %config.environment, "server started");

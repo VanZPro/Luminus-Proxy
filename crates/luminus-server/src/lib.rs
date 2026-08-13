@@ -435,6 +435,14 @@ pub fn parse_startup_config_with_parity(
     {
         return Err("dry-run requires experimental runtime bootstrap".into());
     }
+    if execution == ExperimentalRuntimeExecution::ParityDryRun
+        && (legacy_flag.is_some()
+            || legacy_path.is_some()
+            || legacy_key.is_some()
+            || source_order.is_some())
+    {
+        return Err("parity dry-run requires legacy compatibility to be disabled".into());
+    }
     let legacy = legacy::parse_config(
         runtime_mode,
         legacy_flag,
@@ -457,10 +465,34 @@ pub struct PreparedExperimentalRuntime {
     pub diagnostics: ExperimentalRuntimeDiagnostics,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum NativeStartupParityError {
+    #[error("native startup parity mismatch")]
+    Mismatch(StartupParityReport),
+    #[error(transparent)]
+    Preparation(#[from] Box<dyn std::error::Error>),
+}
+
+pub async fn execute_native_startup_parity_dry_run(
+    base_url: String,
+    api_key: String,
+) -> Result<StartupParityReport, NativeStartupParityError> {
+    let (current_pool, current_router) = prepare_current_runtime(base_url.clone(), api_key.clone())
+        .map_err(NativeStartupParityError::Preparation)?;
+    let experimental = prepare_experimental_runtime(base_url, api_key, None)
+        .await
+        .map_err(NativeStartupParityError::Preparation)?;
+    let report = audit_native_startup_parity(&current_pool, &current_router, &experimental);
+    if report.equivalent {
+        Ok(report)
+    } else {
+        Err(NativeStartupParityError::Mismatch(report))
+    }
+}
+
 #[derive(Debug)]
 pub enum ExperimentalRuntimeExecutionOutcome {
     DryRun(ExperimentalRuntimeDiagnostics),
-    ParityDryRun(StartupParityReport),
     Serving {
         listener: tokio::net::TcpListener,
         app: axum::Router,
@@ -785,6 +817,51 @@ mod tests {
             RuntimeStartupMode::ExperimentalBootstrap
         );
         assert!(config.legacy.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_startup_parity_execution_boundary_is_safe_and_equivalent() {
+        let report = execute_native_startup_parity_dry_run(
+            "http://127.0.0.1:9".into(),
+            "SYNTHETIC_R31B_API_KEY_DO_NOT_LEAK".into(),
+        )
+        .await
+        .expect("native parity execution should succeed");
+        assert!(report.equivalent);
+        let json = serde_json::to_string(&report).unwrap();
+        for forbidden in [
+            "SYNTHETIC_R31B_API_KEY_DO_NOT_LEAK",
+            "127.0.0.1:9",
+            "blackbox-default",
+            "Authorization",
+            "fingerprint",
+            "email",
+        ] {
+            assert!(!json.contains(forbidden));
+        }
+        assert!(json.contains("equivalent"));
+        assert!(json.contains("account_count_matches"));
+        assert!(json.contains("fresh_health_state_matches"));
+    }
+
+    #[test]
+    fn native_startup_parity_mismatch_is_safe_non_success() {
+        let report = StartupParityReport {
+            equivalent: false,
+            account_count_matches: false,
+            account_identity_order_matches: true,
+            provider_identity_order_matches: true,
+            enabled_state_matches: true,
+            routing_policy_matches: true,
+            selection_policy_matches: true,
+            fresh_health_state_matches: true,
+        };
+        let error = NativeStartupParityError::Mismatch(report);
+        assert!(error.to_string().contains("parity mismatch"));
+        match error {
+            NativeStartupParityError::Mismatch(report) => assert!(!report.equivalent),
+            NativeStartupParityError::Preparation(_) => panic!("unexpected preparation error"),
+        }
     }
 
     #[tokio::test]
