@@ -44,6 +44,14 @@ The experimental endpoint remains `/experimental/v1/chat/completions`; no produc
 
 All development fixtures use temporary synthetic SQLite files only. No production database, `.env`, user account, password, token, or historical fallback key is inspected.
 
+## R28 experimental runtime-bootstrap dry-run
+
+Set `LUMINUS_EXPERIMENTAL_RUNTIME_DRY_RUN=true` together with `LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP=true` to validate the same experimental runtime preparation used by Serve mode and exit without binding a TCP listener or serving HTTP. Accepted dry-run values are `true`, `on`, and `1`; `false`, `off`, `0`, or an absent value select Serve behavior. Dry-run under Current mode and malformed values fail safely before startup dispatch.
+
+Dry-run constructs the real native/legacy `RuntimeSnapshot`, applies the existing two-key legacy activation rules, performs explicit read-only legacy preflight and hydration when requested, and emits the safe `ExperimentalRuntimeDiagnostics` JSON summary. It may read the explicitly configured legacy SQLite source, but performs no database writes, migrations, backups, or copies. It performs no provider health checks, upstream requests, background tasks, listener bind, or HTTP serving. The summary contains only aggregate readiness fields: runtime mode, account counts, source status, failure/skipped counts, and explicit source order; it excludes account IDs, paths, URLs, models, emails, credentials, keys, tokens, ciphertext, and raw errors.
+
+Structural configuration, schema, duplicate-account, or requested-source failures return a non-zero error and never fall back to a native-only success. Per-account failures retain normal Serve-mode continuation semantics. With dry-run disabled, Serve mode, `/health`, `/experimental/ready`, the experimental chat route, and the default Current startup remain unchanged. The TypeScript/Bun backend remains production.
+
 ## R27 safe experimental readiness
 
 R27 adds `GET /experimental/ready` only to the experimental bootstrap application. The existing `GET /health` liveness contract is unchanged, and the default/current application does not register the readiness route. A successful experimental startup creates an immutable safe aggregate from the already-computed bootstrap report: runtime mode, runtime account count, native hydrated/failed counts, legacy enabled/preflight/hydrated/failed/skipped counts, and explicit source order.

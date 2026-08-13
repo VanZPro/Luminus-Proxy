@@ -113,9 +113,30 @@ impl RuntimeStartupMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentalRuntimeExecution {
+    Serve,
+    DryRun,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("invalid LUMINUS_EXPERIMENTAL_RUNTIME_DRY_RUN value")]
+pub struct DryRunModeError;
+
+impl ExperimentalRuntimeExecution {
+    pub fn parse(value: Option<&str>) -> Result<Self, DryRunModeError> {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            None | Some("false") | Some("off") | Some("0") => Ok(Self::Serve),
+            Some("true") | Some("on") | Some("1") => Ok(Self::DryRun),
+            Some(_) => Err(DryRunModeError),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerStartupConfig {
     pub runtime_mode: RuntimeStartupMode,
+    pub execution: ExperimentalRuntimeExecution,
     pub legacy: Option<legacy::ExperimentalLegacySourceConfig>,
 }
 
@@ -125,8 +146,15 @@ pub fn parse_startup_config(
     legacy_path: Option<&str>,
     legacy_key: Option<&str>,
     source_order: Option<&str>,
+    dry_run_value: Option<&str>,
 ) -> Result<ServerStartupConfig, Box<dyn std::error::Error>> {
     let runtime_mode = RuntimeStartupMode::parse(runtime_value)?;
+    let execution = ExperimentalRuntimeExecution::parse(dry_run_value)?;
+    if execution == ExperimentalRuntimeExecution::DryRun
+        && runtime_mode != RuntimeStartupMode::ExperimentalBootstrap
+    {
+        return Err("dry-run requires experimental runtime bootstrap".into());
+    }
     let legacy = legacy::parse_config(
         runtime_mode,
         legacy_flag,
@@ -136,7 +164,59 @@ pub fn parse_startup_config(
     )?;
     Ok(ServerStartupConfig {
         runtime_mode,
+        execution,
         legacy,
+    })
+}
+
+pub struct PreparedExperimentalRuntime {
+    pub snapshot: RuntimeSnapshot,
+    pub diagnostics: ExperimentalRuntimeDiagnostics,
+}
+
+#[derive(Debug)]
+pub enum ExperimentalRuntimeExecutionOutcome {
+    DryRun(ExperimentalRuntimeDiagnostics),
+    Serving {
+        listener: tokio::net::TcpListener,
+        app: axum::Router,
+    },
+}
+
+pub async fn execute_prepared_experimental_runtime(
+    prepared: PreparedExperimentalRuntime,
+    execution: ExperimentalRuntimeExecution,
+    address: &str,
+) -> Result<ExperimentalRuntimeExecutionOutcome, Box<dyn std::error::Error>> {
+    match execution {
+        ExperimentalRuntimeExecution::DryRun => Ok(ExperimentalRuntimeExecutionOutcome::DryRun(
+            prepared.diagnostics,
+        )),
+        ExperimentalRuntimeExecution::Serve => {
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            let app = app::experimental_app_with_diagnostics(
+                Arc::new(prepared.snapshot.router),
+                Arc::new(prepared.diagnostics),
+            );
+            Ok(ExperimentalRuntimeExecutionOutcome::Serving { listener, app })
+        }
+    }
+}
+
+pub async fn prepare_experimental_runtime(
+    base_url: String,
+    api_key: String,
+    legacy: Option<legacy::ExperimentalLegacySourceConfig>,
+) -> Result<PreparedExperimentalRuntime, Box<dyn std::error::Error>> {
+    let legacy_enabled = legacy.is_some();
+    let snapshot = match legacy {
+        Some(config) => build_experimental_snapshot_with_legacy(base_url, api_key, config).await?,
+        None => build_experimental_snapshot(base_url, api_key).await?,
+    };
+    let diagnostics = experimental_diagnostics(&snapshot, legacy_enabled);
+    Ok(PreparedExperimentalRuntime {
+        snapshot,
+        diagnostics,
     })
 }
 
@@ -261,14 +341,34 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_mode_parsing_and_current_mode_rejection_are_strict() {
+        assert_eq!(
+            ExperimentalRuntimeExecution::parse(None),
+            Ok(ExperimentalRuntimeExecution::Serve)
+        );
+        assert_eq!(
+            ExperimentalRuntimeExecution::parse(Some("off")),
+            Ok(ExperimentalRuntimeExecution::Serve)
+        );
+        assert_eq!(
+            ExperimentalRuntimeExecution::parse(Some("on")),
+            Ok(ExperimentalRuntimeExecution::DryRun)
+        );
+        assert!(ExperimentalRuntimeExecution::parse(Some("maybe")).is_err());
+        assert!(parse_startup_config(None, None, None, None, None, Some("true")).is_err());
+    }
+
+    #[test]
     fn startup_config_validates_legacy_before_dispatch() {
-        let error = parse_startup_config(Some("false"), Some("true"), None, None, None)
+        let error = parse_startup_config(Some("false"), Some("true"), None, None, None, None)
             .expect_err("legacy must not be accepted by current startup");
         assert!(!error.to_string().contains("SYNTHETIC"));
 
-        assert!(parse_startup_config(None, None, Some("synthetic.db"), None, None).is_err());
-        assert!(parse_startup_config(None, None, None, Some("synthetic-key"), None).is_err());
-        assert!(parse_startup_config(None, None, None, None, Some("native-then-legacy")).is_err());
+        assert!(parse_startup_config(None, None, Some("synthetic.db"), None, None, None).is_err());
+        assert!(parse_startup_config(None, None, None, Some("synthetic-key"), None, None).is_err());
+        assert!(
+            parse_startup_config(None, None, None, None, Some("native-then-legacy"), None).is_err()
+        );
     }
 
     #[test]
@@ -297,7 +397,9 @@ mod tests {
             ),
             (None, Some("true"), Some("db"), Some("key"), None),
         ] {
-            assert!(parse_startup_config(input.0, input.1, input.2, input.3, input.4).is_err());
+            assert!(
+                parse_startup_config(input.0, input.1, input.2, input.3, input.4, None).is_err()
+            );
         }
     }
 
@@ -309,6 +411,7 @@ mod tests {
             Some("synthetic-r26.db"),
             Some("SYNTHETIC_R26_LEGACY_KEY_DO_NOT_LEAK"),
             Some("legacy-then-native"),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -349,6 +452,60 @@ mod tests {
             .unwrap();
         assert_eq!(account.descriptor.provider.0.as_str(), "blackbox");
         assert!(account.descriptor.enabled);
+    }
+
+    #[tokio::test]
+    async fn dry_run_execution_does_not_bind_occupied_address() {
+        let prepared = prepare_experimental_runtime(
+            "http://127.0.0.1:1".into(),
+            "SYNTHETIC_R28_NATIVE_API_KEY_DO_NOT_LEAK".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = occupied.local_addr().unwrap().to_string();
+        let outcome = execute_prepared_experimental_runtime(
+            prepared,
+            ExperimentalRuntimeExecution::DryRun,
+            &address,
+        )
+        .await
+        .unwrap();
+        let ExperimentalRuntimeExecutionOutcome::DryRun(diagnostics) = outcome else {
+            panic!("dry-run must not produce a serving outcome");
+        };
+        assert_eq!(diagnostics.runtime_accounts, 1);
+        assert_eq!(diagnostics.native_hydrated, 1);
+        assert!(!diagnostics.legacy_enabled);
+        assert!(!format!("{diagnostics:?}").contains("SYNTHETIC_R28_NATIVE_API_KEY_DO_NOT_LEAK"));
+        drop(occupied);
+    }
+
+    #[tokio::test]
+    async fn serve_execution_reaches_bind_boundary() {
+        let prepared = prepare_experimental_runtime(
+            "http://127.0.0.1:1".into(),
+            "SYNTHETIC_R28_NATIVE_API_KEY_DO_NOT_LEAK".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = occupied.local_addr().unwrap().to_string();
+        let error = execute_prepared_experimental_runtime(
+            prepared,
+            ExperimentalRuntimeExecution::Serve,
+            &address,
+        )
+        .await
+        .expect_err("serve must attempt the occupied bind");
+        assert!(
+            !error
+                .to_string()
+                .contains("SYNTHETIC_R28_NATIVE_API_KEY_DO_NOT_LEAK")
+        );
+        drop(occupied);
     }
 
     #[tokio::test]

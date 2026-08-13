@@ -5,8 +5,8 @@ use luminus_core::{
 use luminus_providers::{BlackboxConfig, BlackboxProvider};
 use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
-    app, build_experimental_snapshot, build_experimental_snapshot_with_legacy,
-    experimental_diagnostics, parse_startup_config,
+    ExperimentalRuntimeExecutionOutcome, RuntimeStartupMode, app,
+    execute_prepared_experimental_runtime, parse_startup_config, prepare_experimental_runtime,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -18,7 +18,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(&config.log)
         .with_target(false)
         .init();
-
     let startup = parse_startup_config(
         std::env::var("LUMINUS_EXPERIMENTAL_RUNTIME_BOOTSTRAP")
             .ok()
@@ -35,31 +34,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("LUMINUS_EXPERIMENTAL_SOURCE_ORDER")
             .ok()
             .as_deref(),
+        std::env::var("LUMINUS_EXPERIMENTAL_RUNTIME_DRY_RUN")
+            .ok()
+            .as_deref(),
     )?;
-    let address = format!("{}:{}", config.host, config.port);
-    let listener = tokio::net::TcpListener::bind(&address).await?;
-    info!(service = "luminus", version = env!("CARGO_PKG_VERSION"), %address, environment = %config.environment, "server started");
 
-    if startup.runtime_mode == luminus_server::RuntimeStartupMode::ExperimentalBootstrap {
+    if startup.runtime_mode == RuntimeStartupMode::ExperimentalBootstrap {
         let base_url = std::env::var("BLACKBOX_BASE_URL")?;
         let api_key = std::env::var("BLACKBOX_API_KEY")?;
-        let legacy_enabled = startup.legacy.is_some();
-        let snapshot = match startup.legacy {
-            Some(config) => {
-                build_experimental_snapshot_with_legacy(base_url, api_key, config).await?
+        let prepared = prepare_experimental_runtime(base_url, api_key, startup.legacy).await?;
+        let address = format!("{}:{}", config.host, config.port);
+        match execute_prepared_experimental_runtime(prepared, startup.execution, &address).await? {
+            ExperimentalRuntimeExecutionOutcome::DryRun(diagnostics) => {
+                println!("{}", serde_json::to_string(&diagnostics)?);
             }
-            None => build_experimental_snapshot(base_url, api_key).await?,
-        };
-        let diagnostics = Arc::new(experimental_diagnostics(&snapshot, legacy_enabled));
-        axum::serve(
-            listener,
-            app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+            ExperimentalRuntimeExecutionOutcome::Serving { listener, app } => {
+                info!(service = "luminus", version = env!("CARGO_PKG_VERSION"), %address, environment = %config.environment, "server started");
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await?;
+            }
+        }
         return Ok(());
     }
 
+    let address = format!("{}:{}", config.host, config.port);
+    let listener = tokio::net::TcpListener::bind(&address).await?;
     let provider = match (
         std::env::var("BLACKBOX_BASE_URL"),
         std::env::var("BLACKBOX_API_KEY"),
@@ -86,8 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app::experimental_app(Arc::new(router)))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
-
-    info!("server shutdown complete");
     Ok(())
 }
 
@@ -97,7 +95,6 @@ async fn shutdown_signal() {
             .await
             .expect("failed to install Ctrl+C handler");
     };
-
     #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -105,12 +102,7 @@ async fn shutdown_signal() {
             .recv()
             .await;
     };
-
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => info!("shutdown signal received"),
-        _ = terminate => info!("shutdown signal received"),
-    }
+    tokio::select! { _ = ctrl_c => info!("shutdown signal received"), _ = terminate => info!("shutdown signal received"), }
 }
