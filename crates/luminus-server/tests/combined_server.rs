@@ -2,7 +2,10 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -29,6 +32,8 @@ const NATIVE_KEY: &str = "SYNTHETIC_R26_NATIVE_KEY_DO_NOT_LEAK";
 const LEGACY_KEY: &str = "SYNTHETIC_R26_LEGACY_KEY_DO_NOT_LEAK";
 const LEGACY_API_KEY: &str = "SYNTHETIC_R26_LEGACY_API_KEY_DO_NOT_LEAK";
 const TOKEN_SENTINEL: &str = "SYNTHETIC_R26_TOKEN_SECRET_DO_NOT_LEAK";
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static UPSTREAM_REQUESTS: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     path: PathBuf,
@@ -41,8 +46,9 @@ impl Fixture {
             .expect("clock is after epoch")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "luminus-r26-server-{}-{nonce}.db",
-            std::process::id()
+            "luminus-r26-server-{}-{}-{nonce}.db",
+            std::process::id(),
+            FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let connection = Connection::open(&path).expect("create synthetic SQLite fixture");
         connection
@@ -99,6 +105,7 @@ async fn upstream(
         post(move |headers: HeaderMap| {
             let seen = seen.clone();
             async move {
+                UPSTREAM_REQUESTS.fetch_add(1, Ordering::Relaxed);
                 *seen.lock().expect("upstream state lock") = headers
                     .get("authorization")
                     .and_then(|value| value.to_str().ok())
@@ -249,6 +256,7 @@ async fn native_only_readiness_is_safe_and_experimental_only() {
     assert!(text.contains("\"ready\":true"));
     assert!(text.contains("\"legacy_enabled\":false"));
     assert!(!text.contains(NATIVE_KEY));
+    assert!(!text.contains("blackbox-default"));
     let current = app::experimental_app(Arc::new(
         build_experimental_snapshot("http://127.0.0.1:1".into(), NATIVE_KEY.into())
             .await
@@ -268,12 +276,14 @@ async fn native_only_readiness_is_safe_and_experimental_only() {
 
 #[tokio::test]
 async fn combined_readiness_survives_legacy_database_rename() {
+    UPSTREAM_REQUESTS.store(0, Ordering::Relaxed);
     let native_address = upstream(
         "Bearer SYNTHETIC_R26_NATIVE_KEY_DO_NOT_LEAK",
         StatusCode::TOO_MANY_REQUESTS,
         Arc::new(Mutex::new(false)),
     )
     .await;
+    assert_eq!(UPSTREAM_REQUESTS.load(Ordering::Relaxed), 0);
     let legacy_address = upstream(
         "Bearer SYNTHETIC_R26_LEGACY_API_KEY_DO_NOT_LEAK",
         StatusCode::OK,
@@ -301,6 +311,7 @@ async fn combined_readiness_survives_legacy_database_rename() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(UPSTREAM_REQUESTS.load(Ordering::Relaxed), 0);
     let body = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
@@ -315,4 +326,138 @@ async fn combined_readiness_survives_legacy_database_rename() {
     assert!(!text.contains(TOKEN_SENTINEL));
     drop(fixture);
     fs::remove_file(renamed).unwrap();
+}
+
+#[tokio::test]
+async fn reverse_order_readiness_reports_configured_order_without_ids() {
+    let fixture = Fixture::new("http://127.0.0.1:1");
+    let snapshot = build_experimental_snapshot_with_legacy(
+        "http://127.0.0.1:1/v1".into(),
+        NATIVE_KEY.into(),
+        legacy_config(&fixture.path, BlackboxSourceOrder::LegacyThenNative),
+    )
+    .await
+    .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, true));
+    let response = app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics)
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"source_order\":\"legacy-then-native\""));
+    assert!(!text.contains("blackbox-default"));
+    assert!(!text.contains("legacy-ts:2301"));
+}
+
+#[tokio::test]
+async fn empty_legacy_source_readiness_reports_zero_legacy_counts() {
+    let fixture = Fixture::new("http://127.0.0.1:1");
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection.execute("DELETE FROM accounts", []).unwrap();
+    drop(connection);
+    let snapshot = build_experimental_snapshot_with_legacy(
+        "http://127.0.0.1:1/v1".into(),
+        NATIVE_KEY.into(),
+        legacy_config(&fixture.path, BlackboxSourceOrder::NativeThenLegacy),
+    )
+    .await
+    .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, true));
+    let response = app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics)
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"ready\":true"));
+    assert!(text.contains("\"legacy_preflight\":\"passed\""));
+    assert!(text.contains("\"legacy_hydrated\":0"));
+    assert!(text.contains("\"legacy_failed\":0"));
+    assert!(text.contains("\"runtime_accounts\":1"));
+}
+
+#[tokio::test]
+async fn readiness_aggregates_bad_and_good_legacy_accounts() {
+    let fixture = Fixture::new("http://127.0.0.1:1");
+    let connection = Connection::open(&fixture.path).unwrap();
+    connection
+        .execute(
+            "UPDATE accounts SET password = 'not-valid-ciphertext' WHERE id = 2301",
+            [],
+        )
+        .unwrap();
+    let tokens = r#"{"original_provider":"blackbox","base_url":"http://127.0.0.1:1","format":"openai","models":["bb/model"]}"#;
+    connection.execute("INSERT INTO accounts (id, provider, email, password, enabled, tokens) VALUES (2302, 'byok', 'good@example.invalid', ?1, 1, ?2)", params![xor_base64(LEGACY_API_KEY, LEGACY_KEY), tokens]).unwrap();
+    drop(connection);
+    let snapshot = build_experimental_snapshot_with_legacy(
+        "http://127.0.0.1:1/v1".into(),
+        NATIVE_KEY.into(),
+        legacy_config(&fixture.path, BlackboxSourceOrder::NativeThenLegacy),
+    )
+    .await
+    .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, true));
+    let response = app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics)
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"legacy_hydrated\":1"));
+    assert!(text.contains("\"legacy_failed\":1"));
+    assert!(!text.contains("2301"));
+    assert!(!text.contains("2302"));
+}
+
+#[tokio::test]
+async fn readiness_aggregates_unsupported_legacy_accounts_as_skipped() {
+    let fixture = Fixture::new("http://127.0.0.1:1");
+    let connection = Connection::open(&fixture.path).unwrap();
+    let tokens = r#"{"original_provider":"openai-compatible","base_url":"http://127.0.0.1:1","format":"openai","models":["model"]}"#;
+    connection
+        .execute("UPDATE accounts SET tokens = ?1", [tokens])
+        .unwrap();
+    drop(connection);
+    let snapshot = build_experimental_snapshot_with_legacy(
+        "http://127.0.0.1:1/v1".into(),
+        NATIVE_KEY.into(),
+        legacy_config(&fixture.path, BlackboxSourceOrder::NativeThenLegacy),
+    )
+    .await
+    .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, true));
+    let response = app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics)
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"legacy_hydrated\":0"));
+    assert!(text.contains("\"legacy_skipped\":1"));
+    assert!(!text.contains("2301"));
 }
