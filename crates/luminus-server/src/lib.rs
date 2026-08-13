@@ -23,6 +23,54 @@ use luminus_secrets::{
 use luminus_storage::{MemoryAccountRepository, StoredAccount};
 use luminus_storage_sqlite::LegacyTsAccountRepository;
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ConfigurationOrigin {
+    #[serde(rename = "environment")]
+    Environment,
+    #[serde(rename = "built-in")]
+    BuiltIn,
+    #[serde(rename = "explicit-experimental")]
+    ExplicitExperimental,
+    #[serde(rename = "disabled")]
+    Disabled,
+    #[serde(rename = "not-applicable")]
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum ValidationStatus {
+    #[serde(rename = "passed")]
+    Passed,
+    #[serde(rename = "not-applicable")]
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NativeConfigurationDiagnostics {
+    pub metadata_origin: ConfigurationOrigin,
+    pub provider_config_origin: ConfigurationOrigin,
+    pub credential_origin: ConfigurationOrigin,
+    pub validation: ValidationStatus,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LegacyConfigurationDiagnostics {
+    pub activation_origin: ConfigurationOrigin,
+    pub database_origin: ConfigurationOrigin,
+    pub credential_key_origin: ConfigurationOrigin,
+    pub source_order_origin: ConfigurationOrigin,
+    pub validation: ValidationStatus,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConfigurationDiagnostics {
+    pub startup_config: ValidationStatus,
+    pub native: NativeConfigurationDiagnostics,
+    pub legacy: LegacyConfigurationDiagnostics,
+    pub legacy_preflight: ValidationStatus,
+    pub runtime_snapshot: ValidationStatus,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ExperimentalRuntimeDiagnostics {
     pub ready: bool,
@@ -36,11 +84,57 @@ pub struct ExperimentalRuntimeDiagnostics {
     pub legacy_failed: usize,
     pub legacy_skipped: usize,
     pub source_order: Option<&'static str>,
+    pub configuration: ConfigurationDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeConfigurationProvenance {
+    pub native_metadata: ConfigurationOrigin,
+    pub native_provider_config: ConfigurationOrigin,
+    pub native_credentials: ConfigurationOrigin,
+    pub legacy_activation: ConfigurationOrigin,
+    pub legacy_database: ConfigurationOrigin,
+    pub legacy_credential_key: ConfigurationOrigin,
+    pub legacy_source_order: ConfigurationOrigin,
+}
+
+impl RuntimeConfigurationProvenance {
+    pub fn environment_native() -> Self {
+        Self {
+            native_metadata: ConfigurationOrigin::BuiltIn,
+            native_provider_config: ConfigurationOrigin::Environment,
+            native_credentials: ConfigurationOrigin::Environment,
+            legacy_activation: ConfigurationOrigin::NotApplicable,
+            legacy_database: ConfigurationOrigin::NotApplicable,
+            legacy_credential_key: ConfigurationOrigin::NotApplicable,
+            legacy_source_order: ConfigurationOrigin::NotApplicable,
+        }
+    }
+
+    pub fn with_explicit_legacy(mut self) -> Self {
+        self.legacy_activation = ConfigurationOrigin::ExplicitExperimental;
+        self.legacy_database = ConfigurationOrigin::ExplicitExperimental;
+        self.legacy_credential_key = ConfigurationOrigin::ExplicitExperimental;
+        self.legacy_source_order = ConfigurationOrigin::ExplicitExperimental;
+        self
+    }
 }
 
 pub fn experimental_diagnostics(
     snapshot: &RuntimeSnapshot,
     legacy_enabled: bool,
+) -> ExperimentalRuntimeDiagnostics {
+    experimental_diagnostics_with_provenance(
+        snapshot,
+        legacy_enabled,
+        RuntimeConfigurationProvenance::environment_native(),
+    )
+}
+
+pub fn experimental_diagnostics_with_provenance(
+    snapshot: &RuntimeSnapshot,
+    legacy_enabled: bool,
+    provenance: RuntimeConfigurationProvenance,
 ) -> ExperimentalRuntimeDiagnostics {
     use luminus_legacy_composition::LegacyHydrationOutcome;
     let entries = &snapshot.report.legacy_blackbox.entries;
@@ -90,6 +184,48 @@ pub fn experimental_diagnostics(
         legacy_failed: if legacy_enabled { legacy_failed } else { 0 },
         legacy_skipped: if legacy_enabled { legacy_skipped } else { 0 },
         source_order,
+        configuration: ConfigurationDiagnostics {
+            startup_config: ValidationStatus::Passed,
+            native: NativeConfigurationDiagnostics {
+                metadata_origin: provenance.native_metadata,
+                provider_config_origin: provenance.native_provider_config,
+                credential_origin: provenance.native_credentials,
+                validation: ValidationStatus::Passed,
+            },
+            legacy: LegacyConfigurationDiagnostics {
+                activation_origin: if legacy_enabled {
+                    provenance.legacy_activation
+                } else {
+                    ConfigurationOrigin::Disabled
+                },
+                database_origin: if legacy_enabled {
+                    provenance.legacy_database
+                } else {
+                    ConfigurationOrigin::NotApplicable
+                },
+                credential_key_origin: if legacy_enabled {
+                    provenance.legacy_credential_key
+                } else {
+                    ConfigurationOrigin::NotApplicable
+                },
+                source_order_origin: if legacy_enabled {
+                    provenance.legacy_source_order
+                } else {
+                    ConfigurationOrigin::NotApplicable
+                },
+                validation: if legacy_enabled {
+                    ValidationStatus::Passed
+                } else {
+                    ValidationStatus::NotApplicable
+                },
+            },
+            legacy_preflight: if legacy_enabled {
+                ValidationStatus::Passed
+            } else {
+                ValidationStatus::NotApplicable
+            },
+            runtime_snapshot: ValidationStatus::Passed,
+        },
     }
 }
 
@@ -208,12 +344,33 @@ pub async fn prepare_experimental_runtime(
     api_key: String,
     legacy: Option<legacy::ExperimentalLegacySourceConfig>,
 ) -> Result<PreparedExperimentalRuntime, Box<dyn std::error::Error>> {
+    prepare_experimental_runtime_with_provenance(
+        base_url,
+        api_key,
+        legacy,
+        RuntimeConfigurationProvenance::environment_native(),
+    )
+    .await
+}
+
+pub async fn prepare_experimental_runtime_with_provenance(
+    base_url: String,
+    api_key: String,
+    legacy: Option<legacy::ExperimentalLegacySourceConfig>,
+    provenance: RuntimeConfigurationProvenance,
+) -> Result<PreparedExperimentalRuntime, Box<dyn std::error::Error>> {
     let legacy_enabled = legacy.is_some();
     let snapshot = match legacy {
         Some(config) => build_experimental_snapshot_with_legacy(base_url, api_key, config).await?,
         None => build_experimental_snapshot(base_url, api_key).await?,
     };
-    let diagnostics = experimental_diagnostics(&snapshot, legacy_enabled);
+    let provenance = if legacy_enabled {
+        provenance.with_explicit_legacy()
+    } else {
+        provenance
+    };
+    let diagnostics =
+        experimental_diagnostics_with_provenance(&snapshot, legacy_enabled, provenance);
     Ok(PreparedExperimentalRuntime {
         snapshot,
         diagnostics,
@@ -438,6 +595,88 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_diagnostics_report_safe_provenance_and_validation() {
+        let snapshot = build_experimental_snapshot(
+            "http://127.0.0.1:1".into(),
+            "SYNTHETIC_R29_NATIVE_API_KEY_DO_NOT_LEAK".into(),
+        )
+        .await
+        .unwrap();
+        let diagnostics = experimental_diagnostics(&snapshot, false);
+        assert_eq!(
+            diagnostics.configuration.startup_config,
+            ValidationStatus::Passed
+        );
+        assert_eq!(
+            diagnostics.configuration.native.metadata_origin,
+            ConfigurationOrigin::BuiltIn
+        );
+        assert_eq!(
+            diagnostics.configuration.native.provider_config_origin,
+            ConfigurationOrigin::Environment
+        );
+        assert_eq!(
+            diagnostics.configuration.native.credential_origin,
+            ConfigurationOrigin::Environment
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.validation,
+            ValidationStatus::NotApplicable
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy_preflight,
+            ValidationStatus::NotApplicable
+        );
+        assert_eq!(
+            diagnostics.configuration.runtime_snapshot,
+            ValidationStatus::Passed
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.database_origin,
+            ConfigurationOrigin::NotApplicable
+        );
+        let body = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!body.contains("SYNTHETIC_R29_NATIVE_API_KEY_DO_NOT_LEAK"));
+        assert!(!body.contains("127.0.0.1:1"));
+    }
+
+    #[tokio::test]
+    async fn explicit_legacy_diagnostics_report_safe_provenance() {
+        let snapshot = build_experimental_snapshot("http://127.0.0.1:1".into(), "synthetic".into())
+            .await
+            .unwrap();
+        let diagnostics = experimental_diagnostics_with_provenance(
+            &snapshot,
+            true,
+            RuntimeConfigurationProvenance::environment_native().with_explicit_legacy(),
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.activation_origin,
+            ConfigurationOrigin::ExplicitExperimental
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.database_origin,
+            ConfigurationOrigin::ExplicitExperimental
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.credential_key_origin,
+            ConfigurationOrigin::ExplicitExperimental
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.source_order_origin,
+            ConfigurationOrigin::ExplicitExperimental
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy.validation,
+            ValidationStatus::Passed
+        );
+        assert_eq!(
+            diagnostics.configuration.legacy_preflight,
+            ValidationStatus::Passed
         );
     }
 

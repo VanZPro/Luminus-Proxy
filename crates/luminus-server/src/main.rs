@@ -5,8 +5,9 @@ use luminus_core::{
 use luminus_providers::{BlackboxConfig, BlackboxProvider};
 use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
-    ExperimentalRuntimeExecutionOutcome, RuntimeStartupMode, app,
-    execute_prepared_experimental_runtime, parse_startup_config, prepare_experimental_runtime,
+    ExperimentalRuntimeExecutionOutcome, RuntimeConfigurationProvenance, RuntimeStartupMode, app,
+    execute_prepared_experimental_runtime, parse_startup_config,
+    prepare_experimental_runtime_with_provenance,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -42,7 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if startup.runtime_mode == RuntimeStartupMode::ExperimentalBootstrap {
         let base_url = std::env::var("BLACKBOX_BASE_URL")?;
         let api_key = std::env::var("BLACKBOX_API_KEY")?;
-        let prepared = prepare_experimental_runtime(base_url, api_key, startup.legacy).await?;
+        let prepared = prepare_experimental_runtime_with_provenance(
+            base_url,
+            api_key,
+            startup.legacy,
+            RuntimeConfigurationProvenance::environment_native(),
+        )
+        .await?;
         let address = format!("{}:{}", config.host, config.port);
         match execute_prepared_experimental_runtime(prepared, startup.execution, &address).await? {
             ExperimentalRuntimeExecutionOutcome::DryRun(diagnostics) => {

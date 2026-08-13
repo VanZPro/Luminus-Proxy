@@ -52,6 +52,18 @@ Dry-run constructs the real native/legacy `RuntimeSnapshot`, applies the existin
 
 Structural configuration, schema, duplicate-account, or requested-source failures return a non-zero error and never fall back to a native-only success. Per-account failures retain normal Serve-mode continuation semantics. With dry-run disabled, Serve mode, `/health`, `/experimental/ready`, the experimental chat route, and the default Current startup remain unchanged. The TypeScript/Bun backend remains production.
 
+## R29 safe runtime configuration provenance
+
+R29 extends the existing `ExperimentalRuntimeDiagnostics` model used by both `GET /experimental/ready` and R28 dry-run output. The added `configuration` summary reports only typed origin categories and high-level validation statuses; it never reports configuration values. Current categories are `environment`, `built-in`, `explicit-experimental`, `disabled`, and `not-applicable`.
+
+The native account metadata is built into the experimental startup path and is reported as `built-in`. The native provider configuration and credential inputs are read from the already-supported environment variables and are reported generically as `environment`. No URL, API key, path, key, account ID, email, token, ciphertext, secret length, prefix, hash, or fingerprint is retained for diagnostics. R29 does not add configuration variables or alter defaults; this implementation has no native provider-config default-origin case.
+
+When legacy compatibility is disabled, legacy activation is reported as `disabled` and legacy database, key, source-order, configuration validation, and structural preflight are `not-applicable`; this does not imply that a database was inspected. When explicitly enabled in ExperimentalBootstrap mode, activation, database configuration, legacy key configuration, and source order are reported as `explicit-experimental`. The existing safe source-order values remain `native-then-legacy` or `legacy-then-native`.
+
+Validation statuses describe stages that already occurred: startup configuration, native configuration, legacy configuration, legacy structural preflight, and the final runtime snapshot are `passed` only after their existing startup/preparation boundaries succeed. Per-account hydration failures remain separate aggregate counts and do not turn successful structural validation into a degraded configuration state.
+
+Provenance is captured and carried as immutable typed safe state during startup preparation. Readiness and dry-run project the same diagnostics model; neither rereads the environment, enumerates environment variables, performs extra SQLite access, performs provider HTTP probes, monitors changes, or hot-reloads configuration. Current startup, `/health`, the experimental routes, the TypeScript/Bun production path, and default-disabled runtime-bootstrap semantics are unchanged.
+
 ## R27 safe experimental readiness
 
 R27 adds `GET /experimental/ready` only to the experimental bootstrap application. The existing `GET /health` liveness contract is unchanged, and the default/current application does not register the readiness route. A successful experimental startup creates an immutable safe aggregate from the already-computed bootstrap report: runtime mode, runtime account count, native hydrated/failed counts, legacy enabled/preflight/hydrated/failed/skipped counts, and explicit source order.
