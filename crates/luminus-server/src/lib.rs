@@ -2,6 +2,7 @@ pub mod app;
 pub mod legacy;
 pub mod routes;
 
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
 use luminus_composition::{BlackboxAccountHydrator, BlackboxCredentials, BlackboxProviderConfig};
@@ -21,6 +22,76 @@ use luminus_secrets::{
 };
 use luminus_storage::{MemoryAccountRepository, StoredAccount};
 use luminus_storage_sqlite::LegacyTsAccountRepository;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExperimentalRuntimeDiagnostics {
+    pub ready: bool,
+    pub runtime_mode: &'static str,
+    pub runtime_accounts: usize,
+    pub native_hydrated: usize,
+    pub native_failed: usize,
+    pub legacy_enabled: bool,
+    pub legacy_preflight: &'static str,
+    pub legacy_hydrated: usize,
+    pub legacy_failed: usize,
+    pub legacy_skipped: usize,
+    pub source_order: Option<&'static str>,
+}
+
+pub fn experimental_diagnostics(
+    snapshot: &RuntimeSnapshot,
+    legacy_enabled: bool,
+) -> ExperimentalRuntimeDiagnostics {
+    use luminus_legacy_composition::LegacyHydrationOutcome;
+    let entries = &snapshot.report.legacy_blackbox.entries;
+    let legacy_hydrated = entries
+        .iter()
+        .filter(|e| matches!(e.outcome, LegacyHydrationOutcome::HydratedBlackbox))
+        .count();
+    let legacy_skipped = entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.outcome,
+                LegacyHydrationOutcome::SkippedOpenAiCompatible
+                    | LegacyHydrationOutcome::SkippedUnresolved
+            )
+        })
+        .count();
+    let legacy_failed = entries
+        .len()
+        .saturating_sub(legacy_hydrated + legacy_skipped);
+    let source_order = match snapshot.report.source_order {
+        luminus_runtime_bootstrap::BlackboxSourceOrder::NativeThenLegacy => {
+            Some("native-then-legacy")
+        }
+        luminus_runtime_bootstrap::BlackboxSourceOrder::LegacyThenNative if legacy_enabled => {
+            Some("legacy-then-native")
+        }
+        _ => None,
+    };
+    let runtime_accounts = snapshot
+        .account_pool
+        .ordered_ids_for_provider(&luminus_core::model::ProviderId::from("blackbox"))
+        .len();
+    ExperimentalRuntimeDiagnostics {
+        ready: true,
+        runtime_mode: "experimental-bootstrap",
+        runtime_accounts,
+        native_hydrated: runtime_accounts.saturating_sub(legacy_hydrated),
+        native_failed: snapshot.report.native_blackbox.failures.len(),
+        legacy_enabled,
+        legacy_preflight: if legacy_enabled {
+            "passed"
+        } else {
+            "not-applicable"
+        },
+        legacy_hydrated,
+        legacy_failed: if legacy_enabled { legacy_failed } else { 0 },
+        legacy_skipped: if legacy_enabled { legacy_skipped } else { 0 },
+        source_order,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeStartupMode {

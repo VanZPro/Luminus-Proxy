@@ -18,7 +18,8 @@ use luminus_core::model::{AccountId, ProviderId};
 use luminus_runtime_bootstrap::BlackboxSourceOrder;
 use luminus_secrets::SecretString;
 use luminus_server::{
-    app, build_experimental_snapshot_with_legacy, legacy::ExperimentalLegacySourceConfig,
+    app, build_experimental_snapshot, build_experimental_snapshot_with_legacy,
+    experimental_diagnostics, legacy::ExperimentalLegacySourceConfig,
 };
 use rusqlite::{Connection, params};
 use tokio::net::TcpListener;
@@ -224,4 +225,94 @@ async fn combined_server_legacy_then_native_preserves_startup_order() {
             AccountId::from("blackbox-default")
         ]
     );
+}
+
+#[tokio::test]
+async fn native_only_readiness_is_safe_and_experimental_only() {
+    let snapshot = build_experimental_snapshot("http://127.0.0.1:1".into(), NATIVE_KEY.into())
+        .await
+        .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, false));
+    let response = app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics)
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"ready\":true"));
+    assert!(text.contains("\"legacy_enabled\":false"));
+    assert!(!text.contains(NATIVE_KEY));
+    let current = app::experimental_app(Arc::new(
+        build_experimental_snapshot("http://127.0.0.1:1".into(), NATIVE_KEY.into())
+            .await
+            .unwrap()
+            .router,
+    ));
+    let current_response = current
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn combined_readiness_survives_legacy_database_rename() {
+    let native_address = upstream(
+        "Bearer SYNTHETIC_R26_NATIVE_KEY_DO_NOT_LEAK",
+        StatusCode::TOO_MANY_REQUESTS,
+        Arc::new(Mutex::new(false)),
+    )
+    .await;
+    let legacy_address = upstream(
+        "Bearer SYNTHETIC_R26_LEGACY_API_KEY_DO_NOT_LEAK",
+        StatusCode::OK,
+        Arc::new(Mutex::new(false)),
+    )
+    .await;
+    let fixture = Fixture::new(&format!("http://{legacy_address}"));
+    let original = fixture.path.clone();
+    let renamed = original.with_extension("ready-renamed.db");
+    let snapshot = build_experimental_snapshot_with_legacy(
+        format!("http://{native_address}/v1"),
+        NATIVE_KEY.into(),
+        legacy_config(&original, BlackboxSourceOrder::NativeThenLegacy),
+    )
+    .await
+    .unwrap();
+    let diagnostics = Arc::new(experimental_diagnostics(&snapshot, true));
+    fs::rename(&original, &renamed).unwrap();
+    let response = app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics)
+        .oneshot(
+            Request::get("/experimental/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"legacy_enabled\":true"));
+    assert!(text.contains("\"legacy_preflight\":\"passed\""));
+    assert!(text.contains("\"source_order\":\"native-then-legacy\""));
+    assert!(!text.contains("ready-renamed.db"));
+    assert!(!text.contains(NATIVE_KEY));
+    assert!(!text.contains(LEGACY_KEY));
+    assert!(!text.contains(LEGACY_API_KEY));
+    assert!(!text.contains(TOKEN_SENTINEL));
+    drop(fixture);
+    fs::remove_file(renamed).unwrap();
 }

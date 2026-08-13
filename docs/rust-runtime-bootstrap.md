@@ -43,3 +43,9 @@ Per-account failures remain non-fatal after structural preflight. Ambiguous BYOK
 The experimental endpoint remains `/experimental/v1/chat/completions`; no production route, streaming, CRUD, migration, writeback, or Rust database cutover is introduced. Health behavior is unchanged and does not expose legacy details. To roll back R26, unset or disable the legacy flag and, if desired, disable the R25 bootstrap flag; the TypeScript backend remains production.
 
 All development fixtures use temporary synthetic SQLite files only. No production database, `.env`, user account, password, token, or historical fallback key is inspected.
+
+## R27 safe experimental readiness
+
+R27 adds `GET /experimental/ready` only to the experimental bootstrap application. The existing `GET /health` liveness contract is unchanged, and the default/current application does not register the readiness route. A successful experimental startup creates an immutable safe aggregate from the already-computed bootstrap report: runtime mode, runtime account count, native hydrated/failed counts, legacy enabled/preflight/hydrated/failed/skipped counts, and explicit source order.
+
+Readiness describes the successful startup snapshot currently being served. It performs no provider HTTP probe, SQLite access, repository access, provider-config resolution, credential resolution, polling, reload, or hot-watch. The diagnostics response never enumerates account IDs and contains no database path, base URL, email, API key, legacy decryption key, ciphertext, token JSON, or raw lower-level errors. Structural legacy failures still abort startup under R26; readiness is not a deferred 503 state. The TypeScript/Bun backend remains production and default startup behavior is unchanged.

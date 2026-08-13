@@ -5,7 +5,8 @@ use luminus_core::{
 use luminus_providers::{BlackboxConfig, BlackboxProvider};
 use luminus_router::{AccountPool, ProviderAccount, ProviderRegistry, Router as LuminusRouter};
 use luminus_server::{
-    app, build_experimental_snapshot, build_experimental_snapshot_with_legacy, parse_startup_config,
+    app, build_experimental_snapshot, build_experimental_snapshot_with_legacy,
+    experimental_diagnostics, parse_startup_config,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -42,15 +43,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if startup.runtime_mode == luminus_server::RuntimeStartupMode::ExperimentalBootstrap {
         let base_url = std::env::var("BLACKBOX_BASE_URL")?;
         let api_key = std::env::var("BLACKBOX_API_KEY")?;
+        let legacy_enabled = startup.legacy.is_some();
         let snapshot = match startup.legacy {
             Some(config) => {
                 build_experimental_snapshot_with_legacy(base_url, api_key, config).await?
             }
             None => build_experimental_snapshot(base_url, api_key).await?,
         };
-        axum::serve(listener, app::experimental_app(Arc::new(snapshot.router)))
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        let diagnostics = Arc::new(experimental_diagnostics(&snapshot, legacy_enabled));
+        axum::serve(
+            listener,
+            app::experimental_app_with_diagnostics(Arc::new(snapshot.router), diagnostics),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
         return Ok(());
     }
 
