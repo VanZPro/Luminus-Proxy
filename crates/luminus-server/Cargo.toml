@@ -8,6 +8,11 @@ license.workspace = true
 axum.workspace = true
 luminus-composition = { path = "../luminus-composition" }
 luminus-core = { path = "../luminus-core" }
+luminus-legacy-composition = { path = "../luminus-legacy-composition" }
+luminus-legacy-credentials = { path = "../luminus-legacy-credentials" }
+luminus-legacy-provider-config = { path = "../luminus-legacy-provider-config" }
+luminus-storage-sqlite = { path = "../luminus-storage-sqlite" }
+rusqlite.workspace = true
 luminus-provider-config = { path = "../luminus-provider-config" }
 luminus-runtime-bootstrap = { path = "../luminus-runtime-bootstrap" }
 luminus-secrets = { path = "../luminus-secrets" }
@@ -28,5 +33,6 @@ workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+base64.workspace = true
 reqwest.workspace = true
 tower = "0.5"

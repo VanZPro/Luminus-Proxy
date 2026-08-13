@@ -36,7 +36,7 @@ pub async fn chat_completions(
             model: canonical.model.clone(),
             account: None,
         }],
-        policy: luminus_router::RoutingPolicy::new(1, false).map_err(router_error)?,
+        policy: luminus_router::RoutingPolicy::new(2, true).map_err(router_error)?,
     };
     let response = router
         .execute_plan(&canonical, &plan, &context)

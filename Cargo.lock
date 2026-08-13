@@ -699,8 +699,12 @@ name = "luminus-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "luminus-composition",
  "luminus-core",
+ "luminus-legacy-composition",
+ "luminus-legacy-credentials",
+ "luminus-legacy-provider-config",
  "luminus-protocols",
  "luminus-provider-config",
  "luminus-providers",
@@ -708,7 +712,9 @@ dependencies = [
  "luminus-runtime-bootstrap",
  "luminus-secrets",
  "luminus-storage",
+ "luminus-storage-sqlite",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",

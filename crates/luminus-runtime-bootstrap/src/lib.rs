@@ -122,6 +122,10 @@ pub struct NativeOnlyRuntimeBootstrap {
 }
 
 impl NativeOnlyRuntimeBootstrap {
+    pub fn into_native(self) -> BlackboxAccountHydrator {
+        self.native
+    }
+
     pub async fn build(self) -> Result<RuntimeSnapshot, RuntimeBootstrapError> {
         let mut pool = AccountPool::new();
         let native_blackbox = self
