@@ -105,3 +105,10 @@ R34 adds the pure `assess_native_migration_cutover_eligibility` boundary. It acc
 The gate fails closed for an inconsistent `Go` report carrying reasons. `NoGo` remains `Ineligible`, including parity mismatch and legacy-outside-native-scope reasons. An `Eligible` result is only a safe decision artifact: a future manual cutover operation may proceed to its own confirmation/execution phase; R34 does not execute cutover.
 
 R34 performs no environment reads, provider HTTP, SQLite, bind, serving, persistence, runtime construction, or logging side effects. Its safe report contains no AccountIds, URLs, database paths, credentials, Authorization values, fingerprints, timestamps, hostnames, or PIDs. It adds no startup mode, environment variable, route, operator mode, or production wiring. R33 readiness output remains unchanged, Current remains the default, and the TypeScript backend remains production.
+## R35: native cutover plan builder
+
+R35 adds the pure, library-only `build_native_migration_cutover_plan` boundary. It accepts only the R34 `NativeMigrationCutoverEligibilityReport`; R34 remains authoritative, and R35 does not consume R32 diagnostics, parity, runtime state, configuration, or legacy data.
+
+Only a consistent `Eligible` result produces an immutable native-only Current-to-Experimental plan. The plan contains typed abstract transition steps and a deterministic non-empty typed rollback sequence. Ineligible or inconsistent eligibility produces a safe typed error. The plan has no executor, callbacks, commands, shell text, environment assignments, URLs, AccountIds, database paths, credentials, timestamps, host/PID data, or runtime handles.
+
+Building a plan performs no startup mutation, persistence, server bind, provider HTTP, SQLite, environment access, process spawning, or runtime construction. It adds no operator mode, environment variable, route, or startup wiring. R33 output remains unchanged, Current remains the default, and the TypeScript backend remains production.

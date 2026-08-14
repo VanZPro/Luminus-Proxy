@@ -152,6 +152,80 @@ pub struct NativeMigrationCutoverEligibilityReport {
     pub readiness_reasons: Vec<NativeMigrationReadinessReason>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum NativeMigrationCutoverDirection {
+    #[serde(rename = "current-to-experimental-native")]
+    CurrentToExperimentalNative,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum NativeMigrationCutoverStep {
+    ConfirmEligibility,
+    StopCurrentRuntime,
+    SelectExperimentalBootstrap,
+    StartExperimentalRuntime,
+    VerifyHealth,
+    VerifyExperimentalReadiness,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum NativeMigrationRollbackStep {
+    StopExperimentalRuntime,
+    RestoreCurrentStartupSelection,
+    StartCurrentRuntime,
+    VerifyCurrentHealth,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NativeMigrationCutoverPlan {
+    pub direction: NativeMigrationCutoverDirection,
+    pub steps: Vec<NativeMigrationCutoverStep>,
+    pub rollback_steps: Vec<NativeMigrationRollbackStep>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeMigrationCutoverPlanError {
+    Ineligible,
+    InconsistentEligibility,
+}
+
+pub fn build_native_migration_cutover_plan(
+    eligibility: &NativeMigrationCutoverEligibilityReport,
+) -> Result<NativeMigrationCutoverPlan, NativeMigrationCutoverPlanError> {
+    let consistent = match eligibility.eligibility {
+        NativeMigrationCutoverEligibility::Eligible => {
+            eligibility.readiness_decision == MigrationReadinessDecision::Go
+                && eligibility.readiness_reasons.is_empty()
+        }
+        NativeMigrationCutoverEligibility::Ineligible => {
+            eligibility.readiness_decision == MigrationReadinessDecision::NoGo
+        }
+    };
+    if !consistent {
+        return Err(NativeMigrationCutoverPlanError::InconsistentEligibility);
+    }
+    if eligibility.eligibility == NativeMigrationCutoverEligibility::Ineligible {
+        return Err(NativeMigrationCutoverPlanError::Ineligible);
+    }
+    Ok(NativeMigrationCutoverPlan {
+        direction: NativeMigrationCutoverDirection::CurrentToExperimentalNative,
+        steps: vec![
+            NativeMigrationCutoverStep::ConfirmEligibility,
+            NativeMigrationCutoverStep::StopCurrentRuntime,
+            NativeMigrationCutoverStep::SelectExperimentalBootstrap,
+            NativeMigrationCutoverStep::StartExperimentalRuntime,
+            NativeMigrationCutoverStep::VerifyHealth,
+            NativeMigrationCutoverStep::VerifyExperimentalReadiness,
+        ],
+        rollback_steps: vec![
+            NativeMigrationRollbackStep::StopExperimentalRuntime,
+            NativeMigrationRollbackStep::RestoreCurrentStartupSelection,
+            NativeMigrationRollbackStep::StartCurrentRuntime,
+            NativeMigrationRollbackStep::VerifyCurrentHealth,
+        ],
+    })
+}
+
 pub fn assess_native_migration_cutover_eligibility(
     readiness: &NativeMigrationReadinessReport,
 ) -> NativeMigrationCutoverEligibilityReport {
@@ -902,6 +976,11 @@ mod tests {
             eligibility.eligibility,
             NativeMigrationCutoverEligibility::Eligible
         );
+        let plan = build_native_migration_cutover_plan(&eligibility).unwrap();
+        assert_eq!(
+            plan.direction,
+            NativeMigrationCutoverDirection::CurrentToExperimentalNative
+        );
         assert_eq!(
             report,
             assess_native_migration_readiness(&experimental.diagnostics, &parity)
@@ -1249,6 +1328,95 @@ mod tests {
             assert_eq!(result.readiness_decision, report.decision);
             assert_eq!(result.readiness_reasons, report.reasons);
         }
+    }
+
+    #[test]
+    fn native_cutover_plan_builds_deterministically_from_real_eligible_report() {
+        let readiness = NativeMigrationReadinessReport {
+            decision: MigrationReadinessDecision::Go,
+            experimental_snapshot_ready: true,
+            native_startup_parity: true,
+            startup_configuration_validated: true,
+            native_configuration_validated: true,
+            runtime_snapshot_validated: true,
+            native_scope_valid: true,
+            reasons: Vec::new(),
+        };
+        let eligibility = assess_native_migration_cutover_eligibility(&readiness);
+        let first = build_native_migration_cutover_plan(&eligibility).unwrap();
+        let second = build_native_migration_cutover_plan(&eligibility).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.direction,
+            NativeMigrationCutoverDirection::CurrentToExperimentalNative
+        );
+        assert_eq!(
+            first.steps,
+            vec![
+                NativeMigrationCutoverStep::ConfirmEligibility,
+                NativeMigrationCutoverStep::StopCurrentRuntime,
+                NativeMigrationCutoverStep::SelectExperimentalBootstrap,
+                NativeMigrationCutoverStep::StartExperimentalRuntime,
+                NativeMigrationCutoverStep::VerifyHealth,
+                NativeMigrationCutoverStep::VerifyExperimentalReadiness,
+            ]
+        );
+        assert_eq!(
+            first.rollback_steps,
+            vec![
+                NativeMigrationRollbackStep::StopExperimentalRuntime,
+                NativeMigrationRollbackStep::RestoreCurrentStartupSelection,
+                NativeMigrationRollbackStep::StartCurrentRuntime,
+                NativeMigrationRollbackStep::VerifyCurrentHealth,
+            ]
+        );
+        let json = serde_json::to_string(&first).unwrap();
+        for forbidden in [
+            "SYNTHETIC_R35_API_KEY_DO_NOT_LEAK",
+            "http://127.0.0.1",
+            "blackbox-default",
+            "Authorization",
+            "set ",
+            "export ",
+            "cmd.exe",
+            "powershell",
+            "cargo run",
+            "--experimental",
+            "timestamp",
+            "hostname",
+            "pid",
+        ] {
+            assert!(!json.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn native_cutover_plan_rejects_ineligible_and_inconsistent_reports() {
+        let no_go = NativeMigrationCutoverEligibilityReport {
+            eligibility: NativeMigrationCutoverEligibility::Ineligible,
+            readiness_decision: MigrationReadinessDecision::NoGo,
+            readiness_reasons: vec![NativeMigrationReadinessReason::NativeParityMismatch],
+        };
+        assert_eq!(
+            build_native_migration_cutover_plan(&no_go),
+            Err(NativeMigrationCutoverPlanError::Ineligible)
+        );
+        let legacy = NativeMigrationCutoverEligibilityReport {
+            readiness_reasons: vec![NativeMigrationReadinessReason::LegacyOutsideNativeScope],
+            ..no_go.clone()
+        };
+        assert_eq!(
+            build_native_migration_cutover_plan(&legacy),
+            Err(NativeMigrationCutoverPlanError::Ineligible)
+        );
+        let inconsistent = NativeMigrationCutoverEligibilityReport {
+            eligibility: NativeMigrationCutoverEligibility::Eligible,
+            ..no_go
+        };
+        assert_eq!(
+            build_native_migration_cutover_plan(&inconsistent),
+            Err(NativeMigrationCutoverPlanError::InconsistentEligibility)
+        );
     }
 
     #[test]
