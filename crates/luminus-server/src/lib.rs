@@ -137,6 +137,38 @@ pub struct NativeMigrationReadinessReport {
     pub reasons: Vec<NativeMigrationReadinessReason>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub enum NativeMigrationCutoverEligibility {
+    #[serde(rename = "eligible")]
+    Eligible,
+    #[serde(rename = "ineligible")]
+    Ineligible,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NativeMigrationCutoverEligibilityReport {
+    pub eligibility: NativeMigrationCutoverEligibility,
+    pub readiness_decision: MigrationReadinessDecision,
+    pub readiness_reasons: Vec<NativeMigrationReadinessReason>,
+}
+
+pub fn assess_native_migration_cutover_eligibility(
+    readiness: &NativeMigrationReadinessReport,
+) -> NativeMigrationCutoverEligibilityReport {
+    let eligibility =
+        if readiness.decision == MigrationReadinessDecision::Go && readiness.reasons.is_empty() {
+            NativeMigrationCutoverEligibility::Eligible
+        } else {
+            NativeMigrationCutoverEligibility::Ineligible
+        };
+
+    NativeMigrationCutoverEligibilityReport {
+        eligibility,
+        readiness_decision: readiness.decision,
+        readiness_reasons: readiness.reasons.clone(),
+    }
+}
+
 pub fn assess_native_migration_readiness(
     diagnostics: &ExperimentalRuntimeDiagnostics,
     parity: &StartupParityReport,
@@ -865,6 +897,11 @@ mod tests {
         let report = assess_native_migration_readiness(&experimental.diagnostics, &parity);
         assert_eq!(report.decision, MigrationReadinessDecision::Go);
         assert!(report.reasons.is_empty());
+        let eligibility = assess_native_migration_cutover_eligibility(&report);
+        assert_eq!(
+            eligibility.eligibility,
+            NativeMigrationCutoverEligibility::Eligible
+        );
         assert_eq!(
             report,
             assess_native_migration_readiness(&experimental.diagnostics, &parity)
@@ -1179,6 +1216,74 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn native_cutover_eligibility_maps_no_go_reasons_and_fails_closed() {
+        let no_go = NativeMigrationReadinessReport {
+            decision: MigrationReadinessDecision::NoGo,
+            experimental_snapshot_ready: true,
+            native_startup_parity: false,
+            startup_configuration_validated: true,
+            native_configuration_validated: true,
+            runtime_snapshot_validated: true,
+            native_scope_valid: true,
+            reasons: vec![NativeMigrationReadinessReason::NativeParityMismatch],
+        };
+        let legacy_no_go = NativeMigrationReadinessReport {
+            reasons: vec![NativeMigrationReadinessReason::LegacyOutsideNativeScope],
+            ..no_go.clone()
+        };
+        let inconsistent_go = NativeMigrationReadinessReport {
+            decision: MigrationReadinessDecision::Go,
+            reasons: vec![NativeMigrationReadinessReason::NativeParityMismatch],
+            ..no_go.clone()
+        };
+
+        for report in [&no_go, &legacy_no_go, &inconsistent_go] {
+            let result = assess_native_migration_cutover_eligibility(report);
+            assert_eq!(
+                result.eligibility,
+                NativeMigrationCutoverEligibility::Ineligible
+            );
+            assert_eq!(result.readiness_decision, report.decision);
+            assert_eq!(result.readiness_reasons, report.reasons);
+        }
+    }
+
+    #[test]
+    fn native_cutover_eligibility_is_deterministic_immutable_and_safe() {
+        let readiness = NativeMigrationReadinessReport {
+            decision: MigrationReadinessDecision::Go,
+            experimental_snapshot_ready: true,
+            native_startup_parity: true,
+            startup_configuration_validated: true,
+            native_configuration_validated: true,
+            runtime_snapshot_validated: true,
+            native_scope_valid: true,
+            reasons: Vec::new(),
+        };
+        let first = assess_native_migration_cutover_eligibility(&readiness);
+        let second = assess_native_migration_cutover_eligibility(&readiness);
+        assert_eq!(first, second);
+        assert_eq!(
+            first.eligibility,
+            NativeMigrationCutoverEligibility::Eligible
+        );
+        assert_eq!(readiness.decision, MigrationReadinessDecision::Go);
+        let serialized = serde_json::to_string(&first).unwrap();
+        for forbidden in [
+            "SYNTHETIC_R34_API_KEY_DO_NOT_LEAK",
+            "blackbox-default",
+            "Authorization",
+            "http://127.0.0.1",
+            "fingerprint",
+            "timestamp",
+            "hostname",
+            "pid",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]
